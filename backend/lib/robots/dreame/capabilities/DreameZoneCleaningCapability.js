@@ -1,7 +1,6 @@
 const DreameMapParser = require("../DreameMapParser");
-const ZoneCleaningCapability = require("../../../core/capabilities/ZoneCleaningCapability");
-
 const entities = require("../../../entities");
+const ZoneCleaningCapability = require("../../../core/capabilities/ZoneCleaningCapability");
 
 /**
  * @extends ZoneCleaningCapability<import("../DreameValetudoRobot")>
@@ -24,6 +23,8 @@ class DreameZoneCleaningCapability extends ZoneCleaningCapability {
      * @param {number} options.miot_properties.additionalCleanupParameters.piid
      *
      * @param {number} options.zoneCleaningModeId
+     * 
+     * @param {number} [options.maxZoneCount]
      */
     constructor(options) {
         super(options);
@@ -32,14 +33,10 @@ class DreameZoneCleaningCapability extends ZoneCleaningCapability {
         this.miot_properties = options.miot_properties;
 
         this.zoneCleaningModeId = options.zoneCleaningModeId;
+        this.maxZoneCount = options.maxZoneCount ?? 1;
     }
 
-
-    /**
-     * @param {Array<import("../../../entities/core/ValetudoZone")>} valetudoZones
-     * @returns {Promise<void>}
-     */
-    async start(valetudoZones) {
+    async start(options) {
         const FanSpeedStateAttribute = this.robot.state.getFirstMatchingAttribute({
             attributeClass: entities.state.attributes.PresetSelectionStateAttribute.name,
             attributeType: entities.state.attributes.PresetSelectionStateAttribute.TYPE.FAN_SPEED
@@ -54,7 +51,7 @@ class DreameZoneCleaningCapability extends ZoneCleaningCapability {
 
         const zones = [];
 
-        valetudoZones.forEach((vZ, i) => {
+        options.zones.forEach((vZ, i) => {
             const pA = DreameMapParser.CONVERT_TO_DREAME_COORDINATES(vZ.points.pA.x, vZ.points.pA.y);
             const pC = DreameMapParser.CONVERT_TO_DREAME_COORDINATES(vZ.points.pC.x, vZ.points.pC.y);
 
@@ -65,33 +62,26 @@ class DreameZoneCleaningCapability extends ZoneCleaningCapability {
                 pC.x,
                 pC.y,
 
-                vZ.iterations,
+                options.iterations ?? 1,
                 fanSpeed,
                 waterGrade
             ]);
         });
 
-        const res = await this.robot.sendCommand("action",
-            {
-                did: this.robot.deviceId,
-                siid: this.miot_actions.start.siid,
-                aiid: this.miot_actions.start.aiid,
-                in: [
-                    {
-                        piid: this.miot_properties.mode.piid,
-                        value: this.zoneCleaningModeId
-                    },
-                    {
-                        piid: this.miot_properties.additionalCleanupParameters.piid,
-                        value: JSON.stringify({"areas": zones})
-                    }
-                ]
-            }
+        await this.robot.miotHelper.executeAction(
+            this.miot_actions.start.siid,
+            this.miot_actions.start.aiid,
+            [
+                {
+                    piid: this.miot_properties.mode.piid,
+                    value: this.zoneCleaningModeId
+                },
+                {
+                    piid: this.miot_properties.additionalCleanupParameters.piid,
+                    value: JSON.stringify({"areas": zones})
+                }
+            ]
         );
-
-        if (res.code !== 0) {
-            throw new Error("Error code " + res.code);
-        }
     }
 
     /**
@@ -101,11 +91,11 @@ class DreameZoneCleaningCapability extends ZoneCleaningCapability {
         return {
             zoneCount: {
                 min: 1,
-                max: 1
+                max: this.maxZoneCount
             },
             iterationCount: {
                 min: 1,
-                max: 2
+                max: 4
             }
         };
     }

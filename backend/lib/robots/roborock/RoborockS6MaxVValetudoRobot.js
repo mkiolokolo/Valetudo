@@ -1,16 +1,12 @@
 const capabilities = require("./capabilities");
 const entities = require("../../entities");
 const MiioValetudoRobot = require("../MiioValetudoRobot");
+const QuirksCapability = require("../../core/capabilities/QuirksCapability");
+const RoborockQuirkFactory = require("./RoborockQuirkFactory");
 const RoborockValetudoRobot = require("./RoborockValetudoRobot");
 const ValetudoRestrictedZone = require("../../entities/core/ValetudoRestrictedZone");
 
-/**
- * Do NOT buy this robot.
- * Roborock purposefully made this hard to repair which is a consumer-hostile practice
- * that is not supported by Valetudo
- *
- * This class only exists for the unfortunate souls who already own one
- */
+
 class RoborockS6MaxVValetudoRobot extends RoborockValetudoRobot {
     /**
      *
@@ -19,7 +15,17 @@ class RoborockS6MaxVValetudoRobot extends RoborockValetudoRobot {
      * @param {import("../../ValetudoEventStore")} options.valetudoEventStore
      */
     constructor(options) {
-        super(Object.assign({}, options, {fanSpeeds: FAN_SPEEDS, waterGrades: WATER_GRADES}));
+        super(
+            Object.assign(
+                {},
+                options,
+                {
+                    fanSpeeds: FAN_SPEEDS,
+                    waterGrades: WATER_GRADES
+                }
+            )
+        );
+
 
         this.registerCapability(new capabilities.RoborockCombinedVirtualRestrictionsCapability({
             robot: this,
@@ -28,40 +34,52 @@ class RoborockS6MaxVValetudoRobot extends RoborockValetudoRobot {
                 ValetudoRestrictedZone.TYPE.MOP
             ]
         }));
-        this.registerCapability(new capabilities.RoborockMultiMapPersistentMapControlCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMultiMapMapResetCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMapSegmentationCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMapSegmentEditCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMapSegmentRenameCapability({
-            robot: this
-        }));
+
         this.registerCapability(new capabilities.RoborockWaterUsageControlCapability({
             robot: this,
-            presets: Object.keys(this.waterGrades).map(k => new entities.core.ValetudoSelectionPreset({name: k, value: this.waterGrades[k]}))
+            presets: Object.keys(this.waterGrades).map(k => {
+                return new entities.core.ValetudoSelectionPreset({name: k, value: this.waterGrades[k]});
+            })
         }));
 
+        [
+            capabilities.RoborockMultiMapPersistentMapControlCapability,
+            capabilities.RoborockMultiMapMapResetCapability,
+            capabilities.RoborockMapSegmentationCapability,
+            capabilities.RoborockMapSegmentEditCapability,
+            capabilities.RoborockMapSegmentRenameCapability,
+            capabilities.RoborockHighResolutionManualControlCapability,
+            capabilities.RoborockCarpetModeControlCapability,
+        ].forEach(capability => {
+            this.registerCapability(new capability({robot: this}));
+        });
 
-        this.state.upsertFirstMatchingAttribute(new entities.state.attributes.AttachmentStateAttribute({
-            type: entities.state.attributes.AttachmentStateAttribute.TYPE.WATERTANK,
-            attached: false
-        }));
-
-        this.state.upsertFirstMatchingAttribute(new entities.state.attributes.AttachmentStateAttribute({
-            type: entities.state.attributes.AttachmentStateAttribute.TYPE.MOP,
-            attached: false
+        const quirkFactory = new RoborockQuirkFactory({
+            robot: this
+        });
+        this.registerCapability(new QuirksCapability({
+            robot: this,
+            quirks: [
+                quirkFactory.getQuirk(RoborockQuirkFactory.KNOWN_QUIRKS.BUTTON_LEDS)
+            ]
         }));
     }
 
     getModelName() {
         return "S6 MaxV";
+    }
+
+    getModelDetails() {
+        return Object.assign(
+            {},
+            super.getModelDetails(),
+            {
+                supportedAttachments: [
+                    entities.state.attributes.AttachmentStateAttribute.TYPE.WATERTANK,
+                    entities.state.attributes.AttachmentStateAttribute.TYPE.MOP,
+                ]
+            }
+        );
     }
 
     static IMPLEMENTATION_AUTO_DETECTION_HANDLER() {

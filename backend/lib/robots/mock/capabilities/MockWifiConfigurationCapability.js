@@ -1,52 +1,46 @@
-const LinuxWifiConfigurationCapability = require("../../common/linuxCapabilities/LinuxWifiConfigurationCapability");
-const ValetudoWifiConfiguration = require("../../../entities/core/ValetudoWifiConfiguration");
+const ValetudoWifiStatus = require("../../../entities/core/ValetudoWifiStatus");
+const WifiConfigurationCapability = require("../../../core/capabilities/WifiConfigurationCapability");
 
 /**
- * @extends LinuxWifiConfigurationCapability<import("../MockRobot")>
+ * @extends WifiConfigurationCapability<import("../MockValetudoRobot")>
  */
-class MockWifiConfigurationCapability extends LinuxWifiConfigurationCapability {
+class MockWifiConfigurationCapability extends WifiConfigurationCapability {
     /**
      * @param {object} options
-     * @param {import("../MockRobot")} options.robot
+     * @param {import("../MockValetudoRobot")} options.robot
      */
     constructor(options) {
-        super(options);
-        this.connected = true;
-        this.ssid = "Valetudo WiFi";
-    }
+        super(Object.assign({}, options, {networkInterface: "wlan0"}));
 
-    getWifiInterface() {
-        return "wlan0";
+        this.connected = true;
+        this.ssid = "Valetudo Wi-Fi";
     }
 
     /**
-     * @returns {Promise<ValetudoWifiConfiguration>}
+     * @returns {Promise<ValetudoWifiStatus>}
      */
-    async getWifiConfiguration() {
+    async getWifiStatus() {
         if (this.robot.config.get("embedded") === true) {
-            return await super.getWifiConfiguration();
+            return super.getWifiStatus();
         }
 
         const output = {
-            details: {
-                state: this.connected ?
-                    ValetudoWifiConfiguration.STATE.CONNECTED :
-                    ValetudoWifiConfiguration.STATE.NOT_CONNECTED,
-            },
+            state: this.connected ? ValetudoWifiStatus.STATE.CONNECTED : ValetudoWifiStatus.STATE.NOT_CONNECTED,
+            details: {}
         };
 
         if (this.connected) {
             Object.assign(output.details, {
-                signal: Math.floor(-20 - 40 * Math.random()),
+                signal: Math.floor(-20 - (70 * Math.random())),
                 upspeed: 72.2,
                 downspeed: 54,
-                ips: ["192.168.100.100"],
-                frequency: ValetudoWifiConfiguration.FREQUENCY_TYPE.W2_4Ghz,
+                ips: ["192.168.100.100", "fe80::1ff:fe23:4567:890a", "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"],
+                frequency: ValetudoWifiStatus.FREQUENCY_TYPE.W2_4Ghz,
+                ssid: this.ssid
             });
-            output.ssid = this.ssid;
         }
 
-        return new ValetudoWifiConfiguration(output);
+        return new ValetudoWifiStatus(output);
     }
 
     /**
@@ -56,7 +50,9 @@ class MockWifiConfigurationCapability extends LinuxWifiConfigurationCapability {
     async setWifiConfiguration(wifiConfig) {
         this.ssid = wifiConfig.ssid;
         this.connected = false;
-        setTimeout(() => this.connected = true, 10 * 1000);
+        setTimeout(() => {
+            this.connected = true;
+        }, 10 * 1000);
     }
 }
 

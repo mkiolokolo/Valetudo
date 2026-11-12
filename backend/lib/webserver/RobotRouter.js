@@ -1,22 +1,20 @@
 const express = require("express");
-const expresse = require("expresse");
 
 
 const ValetudoRobot = require("../core/ValetudoRobot");
 
 const CapabilitiesRouter = require("./CapabilitiesRouter");
+const {SSEHub, SSEMiddleware} = require("./middlewares/sse");
 
 class RobotRouter {
     /**
      *
      * @param {object} options
      * @param {import("../core/ValetudoRobot")} options.robot
-     * @param {boolean} options.enableDebugCapability
      * @param {*} options.validator
      */
     constructor(options) {
         this.robot = options.robot;
-        this.enableDebugCapability = options.enableDebugCapability;
         this.router = express.Router({mergeParams: true});
 
         this.validator = options.validator;
@@ -31,8 +29,13 @@ class RobotRouter {
             res.json({
                 manufacturer: this.robot.getManufacturer(),
                 modelName: this.robot.getModelName(),
+                modelDetails: this.robot.getModelDetails(),
                 implementation: this.robot.constructor.name
             });
+        });
+
+        this.router.get("/properties", (req, res) => {
+            res.json(this.robot.getProperties());
         });
 
         this.router.get("/state", async (req, res) => {
@@ -57,9 +60,7 @@ class RobotRouter {
 
         this.router.get("/state/map", async (req, res) => {
             try {
-                const polledState = await this.robot.pollState();
-
-                res.json(polledState.map);
+                res.json(this.robot.state.map);
             } catch (err) {
                 res.status(500).send(err.toString());
             }
@@ -68,78 +69,83 @@ class RobotRouter {
 
         this.router.use("/capabilities/", new CapabilitiesRouter({
             robot: this.robot,
-            enableDebugCapability: this.enableDebugCapability,
             validator: this.validator
         }).getRouter());
     }
 
     initSSE() {
         this.sseHubs = {
-            state: new expresse.Hub(),
-            attributes: new expresse.Hub(),
-            map: new expresse.Hub()
+            state: new SSEHub({name: "State"}),
+            attributes: new SSEHub({name: "Attributes"}),
+            map: new SSEHub({name: "Map"})
         };
 
         this.robot.onStateUpdated(() => {
             this.sseHubs.state.event(
                 ValetudoRobot.EVENTS.StateUpdated,
-                Buffer.from(JSON.stringify(this.robot.state))
+                JSON.stringify(this.robot.state)
             );
         });
 
         this.robot.onStateAttributesUpdated(() => {
             this.sseHubs.attributes.event(
                 ValetudoRobot.EVENTS.StateAttributesUpdated,
-                Buffer.from(JSON.stringify(this.robot.state.attributes))
+                JSON.stringify(this.robot.state.attributes)
             );
         });
 
         this.robot.onMapUpdated(() => {
             this.sseHubs.map.event(
                 ValetudoRobot.EVENTS.MapUpdated,
-                Buffer.from(JSON.stringify(this.robot.state.map))
+                JSON.stringify(this.robot.state.map)
             );
         });
 
         this.router.get(
             "/state/sse",
-            expresse.sseHub({
+            SSEMiddleware({
                 hub: this.sseHubs.state,
-                flushAfterWrite: true,
-                maxSocketBufferSize: 10 * 1024,
-                maxClients: 5,
-                terminateStaleConnections: true
+                keepAliveInterval: 5000,
+                maxClients: 5
             }),
-            (req, res) => {}
+            (req, res) => {
+                //Intentional, as the response will be handled by the SSEMiddleware
+            }
         );
 
         this.router.get(
             "/state/attributes/sse",
-            expresse.sseHub({
+            SSEMiddleware({
                 hub: this.sseHubs.attributes,
-                flushAfterWrite: true,
-                maxSocketBufferSize: 10 * 1024,
-                maxClients: 5,
-                terminateStaleConnections: true
+                keepAliveInterval: 5000,
+                maxClients: 5
             }),
-            (req, res) => {}
+            (req, res) => {
+                //Intentional, as the response will be handled by the SSEMiddleware
+            }
         );
 
         this.router.get(
             "/state/map/sse",
-            expresse.sseHub({
+            SSEMiddleware({
                 hub: this.sseHubs.map,
-                flushAfterWrite: true,
-                maxSocketBufferSize: 10 * 1024,
-                maxClients: 5,
-                terminateStaleConnections: true
+                keepAliveInterval: 5000,
+                maxClients: 5
             }),
-            (req, res) => {}
+            (req, res) => {
+                //Intentional, as the response will be handled by the SSEMiddleware
+            }
         );
     }
 
     getRouter() {
         return this.router;
+    }
+
+    shutdown() {
+        Object.values(this.sseHubs).forEach(hub => {
+            hub.shutdown();
+        });
     }
 }
 

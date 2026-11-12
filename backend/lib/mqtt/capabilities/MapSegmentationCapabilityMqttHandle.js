@@ -1,5 +1,7 @@
 const CapabilityMqttHandle = require("./CapabilityMqttHandle");
 const DataType = require("../homie/DataType");
+const HassAnchor = require("../homeassistant/HassAnchor");
+const Logger = require("../../Logger");
 const PropertyMqttHandle = require("../handles/PropertyMqttHandle");
 
 class MapSegmentationCapabilityMqttHandle extends CapabilityMqttHandle {
@@ -22,26 +24,65 @@ class MapSegmentationCapabilityMqttHandle extends CapabilityMqttHandle {
             topicName: "clean",
             friendlyName: "Clean segments",
             datatype: DataType.STRING,
-            format: "segment or segments JSON array",
+            format: "same json as the REST interface",
             setter: async (value) => {
-                let reqSegments = JSON.parse(value);
+                const reqSegments = JSON.parse(value);
 
-                if (!Array.isArray(reqSegments)) {
-                    reqSegments = [reqSegments];
-                }
-                const robotSegments = await this.capability.getSegments();
-                const segments = [];
-                for (const id of reqSegments) {
-                    const segment = robotSegments.find(segm => (segm.id === id || parseInt(segm.id) === id));
-                    if (!segment) {
-                        throw new Error(`Segment ID does not exist, or map was not loaded: ${id}`);
+                if (Array.isArray(reqSegments.segment_ids) && reqSegments.segment_ids.length > 0) {
+                    const requestOptions = {};
+
+                    if (typeof reqSegments.iterations === "number") {
+                        requestOptions.iterations = reqSegments.iterations;
                     }
-                    segments.push(segment);
+
+                    if (reqSegments.customOrder === true) {
+                        requestOptions.customOrder = true;
+                    }
+
+                    const robotSegments = await this.capability.getSegments();
+                    const segments = [];
+
+                    for (const id of reqSegments.segment_ids) {
+                        const segment = robotSegments.find(segm => {
+                            return segm.id === `${id}`; // Ensure that it works even if the user incorrectly passes numbers
+                        });
+                        if (!segment) {
+                            throw new Error(`Segment ID does not exist, or map was not loaded: ${id}`);
+                        }
+                        segments.push(segment);
+                    }
+
+                    await this.capability.executeSegmentAction(segments, requestOptions);
+                } else {
+                    throw new Error("Missing or empty segment_ids Array in payload");
                 }
-                await this.capability.executeSegmentAction(segments);
-            }
+            },
+            helpText: "This handle accepts a JSON object identical to the one used by the REST API.\n\n" +
+                "Simply use the Map in the Valetudo UI, select the desired segments and iterations and then long-press the button that would start the action.<br/>\n" +
+                "This will open a modal containing the copy-pasteable payload.\n\n" +
+                "\n**Note:** Not all firmwares support customOrder.\n\n" +
+                "Sample payload:\n\n" +
+                "```json\n" +
+                JSON.stringify({
+                    segment_ids: [
+                        "20",
+                        "18",
+                        "16"
+                    ],
+                    iterations: 2,
+                    customOrder: true
+                }, null, 2) +
+                "\n```"
+        }).also((prop) => {
+            this.controller.hassAnchorProvider.getTopicReference(
+                HassAnchor.REFERENCE.CLEAN_SEGMENT_COMMAND
+            ).post(prop.getBaseTopic() + "/set").catch(err => {
+                Logger.error("Error while posting value to HassAnchor", err);
+            });
         }));
     }
 }
+
+MapSegmentationCapabilityMqttHandle.OPTIONAL = false;
 
 module.exports = MapSegmentationCapabilityMqttHandle;

@@ -1,6 +1,7 @@
 const DataType = require("../homie/DataType");
 const iso8601 = require("../../utils/iso8601");
 const Logger = require("../../Logger");
+const MqttCommonAttributes = require("../MqttCommonAttributes");
 const NotImplementedError = require("../../core/NotImplementedError");
 
 /**
@@ -17,7 +18,7 @@ class MqttHandle {
      * @param {import("../MqttController")} options.controller MqttController instance
      * @param {boolean} [options.gettable] Whether this handle's root topic can be published, Default false
      * @param {boolean} [options.settable] Whether this handle's /set topic should be subscribed to. Default false
-     * @param {string} [options.datatype] Data type for this handle, if gettable/settable
+     * @param {DataType} [options.datatype] Data type for this handle, if gettable/settable
      * @param {string} [options.format] Restrictions or options based on the given datatype
      * @param {boolean} [options.retained] Whether to retain this property, default true
      * @param {string} [options.helpText] Optional help message to be included in the documentation
@@ -64,8 +65,9 @@ class MqttHandle {
     getBaseTopic() {
         if (this.parent !== null) {
             return this.parent.getBaseTopic() + "/" + this.topicName;
+        } else {
+            throw new NotImplementedError();
         }
-        throw new NotImplementedError();
     }
 
     /**
@@ -77,11 +79,20 @@ class MqttHandle {
      */
     getInterestingTopics() {
         let topics = {};
+
         if (this.settable) {
             topics[this.getBaseTopic() + "/set"] = async (value) => {
-                await this.setHomie(value);
+                try {
+                    await this.setHomie(value);
+                } catch (err) {
+                    Logger.error("MQTT: Error while handling " + this.getBaseTopic() + "/set", {
+                        payload: value,
+                        error: err
+                    });
+                }
             };
         }
+
         return topics;
     }
 
@@ -96,9 +107,10 @@ class MqttHandle {
      * @return {void}
      */
     registerChild(child) {
-        if (this.controller.isInitialized()) {
+        if (this.controller.isInitialized) {
             throw new Error("New children may only be registered while the MQTT controller is not initialized");
         }
+
         this.children.push(child);
     }
 
@@ -112,9 +124,10 @@ class MqttHandle {
      * @return {void}
      */
     deregisterChild(child) {
-        if (this.controller.isInitialized()) {
+        if (this.controller.isInitialized) {
             throw new Error("Children may only be deregistered while the MQTT controller is not initialized");
         }
+
         const idx = this.children.indexOf(child);
         if (idx >= 0) {
             this.children.splice(idx, 1);
@@ -156,9 +169,10 @@ class MqttHandle {
      * @return {Promise<void>}
      */
     async configure() {
-        if (this.controller.isInitialized()) {
+        if (this.controller.isInitialized) {
             throw new Error("Handle may only be configured while the MQTT controller is not initialized");
         }
+
         await this.controller.publishHomieAttributes(this);
         await this.controller.subscribe(this);
 
@@ -169,6 +183,7 @@ class MqttHandle {
                 Logger.warn("MQTT handle " + child.getBaseTopic() + " failed to configure", e);
             }
         }
+
         for (const component of this.hassComponents) {
             try {
                 await component.configure();
@@ -179,8 +194,7 @@ class MqttHandle {
     }
 
     /**
-     * Deconfigure this handle. It will publish zero-length payloads to all autodiscovery-related attributes.
-     * It will also deconfigure all children handles.
+     * Deconfigure this handle. It will also deconfigure all children handles.
      * This function must be used as a callback of the controller's reconfigure method so that the state is updated
      * accordingly.
      *
@@ -189,27 +203,20 @@ class MqttHandle {
      * @return {Promise<void>}
      */
     async deconfigure(options) {
-        if (this.controller.isInitialized()) {
+        if (this.controller.isInitialized) {
             throw new Error("Handle may only be deconfigured while the MQTT controller is not initialized");
         }
+
         if (options === undefined || options.unsubscribe !== false) {
             await this.controller.unsubscribe(this);
         }
 
         for (const component of this.hassComponents) {
-            await component.deconfigure(Object.assign({
-                cleanHass: false,
-            }, options));
-        }
-        for (const child of this.children) {
-            await child.deconfigure(options);
+            await component.deconfigure(options);
         }
 
-        if (options === undefined || options.cleanValues !== false) {
-            await this.controller.dropHandleValue(this);
-        }
-        if (options === undefined || options.cleanHomie !== false) {
-            await this.controller.dropHomieAttributes(this);
+        for (const child of this.children) {
+            await child.deconfigure(options);
         }
     }
 
@@ -221,9 +228,11 @@ class MqttHandle {
      */
     async refresh() {
         await this.controller.refresh(this);
+
         for (const child of this.children) {
             await child.refresh();
         }
+
         for (const component of this.hassComponents) {
             await component.refresh();
         }
@@ -256,6 +265,15 @@ class MqttHandle {
     }
 
     /**
+     * @public
+     * @returns {number}
+     */
+    getQoS() {
+        // Reasonable default for most things published to mqtt
+        return MqttCommonAttributes.QOS.AT_LEAST_ONCE;
+    }
+
+    /**
      * Used by MqttController to retrieve the value of this property to be published for Homie
      *
      * @public
@@ -267,10 +285,12 @@ class MqttHandle {
                 if (this.lastSetValue === null || this.lastSetValue === undefined) {
                     return null;
                 }
+
                 return this.marshalHomie(this.lastSetValue, this.dataType);
             } else {
                 return this.marshalHomie(await this.get(), this.dataType);
             }
+
         } catch (err) {
             Logger.warn("Failed to parse value to be sent for topic " + this.getBaseTopic() + ":", err);
             return null;
@@ -288,14 +308,19 @@ class MqttHandle {
         if (!this.settable) {
             return;
         }
+
         let converted = null;
+
         try {
             converted = this.unmarshalHomie(value, this.dataType);
         } catch (err) {
             Logger.warn("Failed to parse received value, topic " + this.getBaseTopic() + "/set, value: '" + value + "':", err);
             return;
         }
+
+
         await this.set(converted);
+
         if (this.isCommand) {
             this.lastSetValue = converted;
             await this.refresh();
@@ -314,6 +339,7 @@ class MqttHandle {
         if (value === null || value === undefined) {
             return null;
         }
+
         if (value instanceof Buffer) {
             if (datatype !== DataType.STRING) {
                 throw new Error("Outbound Buffer is only allowed for data of type STRING");
@@ -321,6 +347,7 @@ class MqttHandle {
                 return value;
             }
         }
+
         switch (datatype) {
             case DataType.STRING:
             case DataType.ENUM:
@@ -328,12 +355,15 @@ class MqttHandle {
                 if (typeof value === "object") {
                     value = JSON.stringify(value);
                 }
+
                 if (typeof value !== "string") {
                     throw new Error("Value must be a string or a buffer!");
                 }
+
                 if (datatype === DataType.ENUM && datatype === this.dataType && this.format.split(",").indexOf(value) < 0) {
                     throw new Error("Value '" + value + "' is invalid for enum with format [" + this.format + "]!");
                 }
+
                 return value;
             case DataType.INTEGER:
                 return Math.round(value).toString();
@@ -343,6 +373,7 @@ class MqttHandle {
                 if (value.prototype.toISOString === undefined) {
                     throw new Error("Date value must be a Date object!");
                 }
+
                 return value.prototype.toISOString();
             case DataType.DURATION:
                 return iso8601.numberToDuration(value);
@@ -365,14 +396,17 @@ class MqttHandle {
         if (value === null || value === undefined) {
             return null;
         }
+
         switch (datatype) {
             case DataType.ENUM:
                 if (datatype !== this.dataType) {
                     return value;
                 }
+
                 if (this.format.split(",").indexOf(value) < 0) {
                     throw new Error("Value '" + value + "' is invalid for enum with format [" + this.format + "]!");
                 }
+
                 return value;
             case DataType.INTEGER:
                 return parseInt(value, 10);

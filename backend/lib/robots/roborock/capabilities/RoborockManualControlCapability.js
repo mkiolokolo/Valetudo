@@ -21,6 +21,7 @@ class RoborockManualControlCapability extends ManualControlCapability {
         }));
 
         this.sequenceId = 0;
+        this.active = false;
     }
 
     /**
@@ -28,6 +29,7 @@ class RoborockManualControlCapability extends ManualControlCapability {
      */
     async enableManualControl() {
         this.sequenceId = 0;
+        this.active = true;
 
         return this.robot.sendCommand("app_rc_start", [], {});
     }
@@ -37,8 +39,16 @@ class RoborockManualControlCapability extends ManualControlCapability {
      */
     async disableManualControl() {
         this.sequenceId = 0;
+        this.active = false;
 
         return this.robot.sendCommand("app_rc_end", [], {});
+    }
+
+    /**
+     * @returns {Promise<boolean>}
+     */
+    async manualControlActive() {
+        return this.active;
     }
 
     /**
@@ -49,12 +59,21 @@ class RoborockManualControlCapability extends ManualControlCapability {
         let angle = 0;
         let velocity = 0;
 
+        /**
+         * According to user reports, the Roborock V1 doesn't like velocities >= (-)0.3
+         * They work fine with the S5 and newer(?) but get ignored by the V1 firmware
+         * causing it to not move at all.
+         *
+         * For now (2022-04-10) we just reduce it for all robots.
+         * In the future, the velocity value might become robot-specific
+         */
+
         switch (movementCommand) {
             case ManualControlCapability.MOVEMENT_COMMAND_TYPE.FORWARD:
-                velocity = 0.3;
+                velocity = 0.29;
                 break;
             case ManualControlCapability.MOVEMENT_COMMAND_TYPE.BACKWARD:
-                velocity = -0.3;
+                velocity = -0.29;
                 break;
             case ManualControlCapability.MOVEMENT_COMMAND_TYPE.ROTATE_CLOCKWISE:
                 angle = (60*(Math.PI / 180)) * -1;

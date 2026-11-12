@@ -1,15 +1,19 @@
 const capabilities = require("./capabilities");
 const fs = require("fs");
 const Logger = require("../../Logger");
-const RRMapParser = require("./RRMapParser");
-const zlib = require("zlib");
+const RoborockConst = require("./RoborockConst");
+const RoborockMapParser = require("./RoborockMapParser");
 
 const DustBinFullValetudoEvent = require("../../valetudo_events/events/DustBinFullValetudoEvent");
 const entities = require("../../entities");
+const LinuxTools = require("../../utils/LinuxTools");
+const LinuxWifiScanCapability = require("../common/linuxCapabilities/LinuxWifiScanCapability");
 const MapLayer = require("../../entities/map/MapLayer");
+const MiioDummycloudNotConnectedError = require("../../miio/MiioDummycloudNotConnectedError");
 const MiioValetudoRobot = require("../MiioValetudoRobot");
 const PendingMapChangeValetudoEvent = require("../../valetudo_events/events/PendingMapChangeValetudoEvent");
 const ValetudoMap = require("../../entities/map/ValetudoMap");
+const ValetudoRobotError = require("../../entities/core/ValetudoRobotError");
 const ValetudoSelectionPreset = require("../../entities/core/ValetudoSelectionPreset");
 
 const stateAttrs = entities.state.attributes;
@@ -22,42 +26,60 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
      * @param {import("../../ValetudoEventStore")} options.valetudoEventStore
      * @param {object} options.fanSpeeds
      * @param {object} [options.waterGrades]
+     * @param {import("./RoborockConst").DOCK_TYPE} [options.dockType]
      */
     constructor(options) {
         super(options);
 
-        this.lastMapPoll = new Date(0);
+        this.mapPollMiioCommand = MAP_POLL_COMMANDS.GetFreshMap;
         this.fanSpeeds = options.fanSpeeds;
         this.waterGrades = options.waterGrades ?? {};
-
-        this.segmentNames = undefined;
+        this.dockType = options.dockType ?? RoborockConst.DOCK_TYPE.CHARGING;
 
         this.registerCapability(new capabilities.RoborockFanSpeedControlCapability({
             robot: this,
-            presets: Object.keys(this.fanSpeeds).map(k => new ValetudoSelectionPreset({name: k, value: this.fanSpeeds[k]}))
+            presets: Object.keys(this.fanSpeeds).map(k => {
+                return new ValetudoSelectionPreset({name: k, value: this.fanSpeeds[k]});
+            })
+        }));
+
+        this.registerCapability(new capabilities.RoborockConsumableMonitoringCapability({
+            robot: this,
+            dockType: this.dockType
         }));
 
         [
             capabilities.RoborockBasicControlCapability,
-            capabilities.RoborockConsumableMonitoringCapability,
             capabilities.RoborockZoneCleaningCapability,
             capabilities.RoborockGoToLocationCapability,
-            capabilities.RoborockWifiConfigurationCapability,
             capabilities.RoborockLocateCapability,
             capabilities.RoborockDoNotDisturbCapability,
-            capabilities.RoborockCarpetModeControlCapability,
             capabilities.RoborockSpeakerVolumeControlCapability,
             capabilities.RoborockSpeakerTestCapability,
             capabilities.RoborockVoicePackManagementCapability,
-            capabilities.RoborockManualControlCapability
+            capabilities.RoborockTotalStatisticsCapability,
+            capabilities.RoborockCurrentStatisticsCapability,
         ].forEach(capability => {
             this.registerCapability(new capability({robot: this}));
         });
 
-        this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
-            type: stateAttrs.AttachmentStateAttribute.TYPE.DUSTBIN,
-            attached: true
+        this.registerCapability(new capabilities.RoborockWifiConfigurationCapability({
+            robot: this,
+            networkInterface: "wlan0"
         }));
+
+        if (this.config.get("embedded") === true) {
+            this.registerCapability(new LinuxWifiScanCapability({
+                robot: this,
+                networkInterface: "wlan0"
+            }));
+        }
+
+        if (this.dockType === RoborockConst.DOCK_TYPE.ULTRA) {
+            this.state.upsertFirstMatchingAttribute(new entities.state.attributes.DockStatusStateAttribute({
+                value: entities.state.attributes.DockStatusStateAttribute.VALUE.IDLE
+            }));
+        }
     }
 
     setEmbeddedParameters() {
@@ -66,11 +88,15 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
     }
 
 
-    onMessage(msg) {
+    onIncomingCloudMessage(msg) {
         switch (msg.method) {
             case "props":
                 this.parseAndUpdateState(msg.params);
-                this.sendCloud({id: msg.id, result: "ok"});
+
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+
                 return true;
             case "event.status":
                 if (msg.params &&
@@ -78,21 +104,20 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
                     msg.params[0].state !== undefined
                 ) {
                     this.parseAndUpdateState(msg.params[0]);
-
-                    let StatusStateAttribute = this.state.getFirstMatchingAttribute({
-                        attributeClass: stateAttrs.StatusStateAttribute.name
-                    });
-
-                    if (StatusStateAttribute && StatusStateAttribute.isActiveState) {
-                        this.pollMap();
-                    }
                 }
-                this.sendCloud({id: msg.id, result: "ok"});
+
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+
                 return true;
             case "_sync.getctrycode":
                 this.sendCloud({
                     id: msg.id, result: {ctry_code: "DE"} //TODO
+                }).catch(e => {
+                    Logger.warn(`Error while responding to ${msg.method}`, e);
                 });
+
                 return true;
             case "_sync.getAppData":
                 this.sendCloud({
@@ -101,7 +126,11 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
                         code: -6,
                         message: "not set app data"
                     }
+                }).catch(e => {
+                    Logger.warn(`Error while responding to ${msg.method}`, e);
                 });
+
+
                 return true;
             // Roborock does not use the common presigned URL implementation, it requires this specific format.
             case "_sync.gen_tmp_presigned_url":
@@ -114,46 +143,87 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
                 if (Array.isArray(msg.params?.indexes)) {
                     msg.params.indexes.forEach(idx => {
                         mapUploadUrls.push(
-                            this.mapUploadUrlPrefix +
-                            "/api/miio/map_upload_handler/" + filename + "_" + idx + "?" +
-                            process.hrtime().toString().replace(/,/g, "")
+                            `${this.mapUploadUrlPrefix}/api/miio/fds_upload_handler/${filename}_${idx}?${process.hrtime().toString().replace(/,/g, "")}`
                         );
                     });
                 } else {
                     for (let i = 0; i < 4; i++) {
                         mapUploadUrls.push(
-                            this.mapUploadUrlPrefix +
-                            "/api/miio/map_upload_handler/" + filename + "_" + i + "?" +
-                            process.hrtime().toString().replace(/,/g, "")
+                            `${this.mapUploadUrlPrefix}/api/miio/fds_upload_handler/${filename}_${i}?${process.hrtime().toString().replace(/,/g, "")}`
                         );
                     }
                 }
 
-                this.sendCloud({id: msg.id, result: mapUploadUrls});
+                this.sendCloud({id: msg.id, result: mapUploadUrls}).catch(e => {
+                    Logger.warn(`Error while responding to ${msg.method}`, e);
+                });
+
+
                 return true;
             }
 
             case "event.bin_full":
                 this.valetudoEventStore.raise(new DustBinFullValetudoEvent({}));
-                this.sendCloud({id: msg.id, result: "ok"});
-                break;
+
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+
+                return true;
             case "event.remind_to_save_map":
                 this.valetudoEventStore.raise(new PendingMapChangeValetudoEvent({}));
-                this.sendCloud({id: msg.id, result: "ok"});
-                break;
 
-            case "event.back_to_dock": //TODO
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+
+                return true;
+
+            case "event.segment_map_done":
+                this.pollMap();
+                this.pollState().catch((err) => {
+                    Logger.warn("Error while polling state after map split", err);
+                });
+
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+
+                return true;
+            case "event.back_to_dock":
             case "event.error_code":
             case "event.relocate_failed_back":
             case "event.goto_target_succ":
             case "event.target_not_reachable":
             case "event.consume_material_notify":
-            case "event.segment_map_done":
             case "event.clean_complete":
+            case "event.segment_clean_succ":
+            case "event.segment_clean_part_done":
+            case "event.zoned_clean_succ":
+            case "event.zoned_clean_partial_done":
+            case "event.zoned_clean_failed":
+            case "event.relocate_fail":
+            case "event.fan_power_reduced":
             case "event.low_power_back": //If the robot is currently cleaning and the battery drops below 20% it drives home to charge
-                this.sendCloud({id: msg.id, result: "ok"});
+            case "event.start_with_water_box":
+            case "event.back_to_origin_fail":
+            case "event.back_to_origin_succ":
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+
                 return true;
         }
+
+        // noinspection RedundantIfStatementJS
+        if (msg.id === 0 && msg.result === "unknown_method") {
+            // On the S5 Max fw 1566 and probably other robots and firmwares, we receive this on startup
+            // It's probably an artifact of the miio_client downgrade
+            // => We'll just silently ignore it
+
+            return true;
+        }
+
         return false;
     }
 
@@ -170,11 +240,31 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
 
     //TODO: viomi repolls the map on status change to quick poll states. We probably should do the same
     parseAndUpdateState(data) {
+        const supportedAttachments = this.getModelDetails().supportedAttachments;
         let newStateAttr;
+
+        if (this.dockType === RoborockConst.DOCK_TYPE.ULTRA) {
+            if (data["state"] !== undefined) {
+                switch (data["state"]) {
+                    case 23:
+                    case 25:
+                    case 26:
+                        this.state.upsertFirstMatchingAttribute(new entities.state.attributes.DockStatusStateAttribute({
+                            value: entities.state.attributes.DockStatusStateAttribute.VALUE.CLEANING
+                        }));
+                        break;
+                    default:
+                        this.state.upsertFirstMatchingAttribute(new entities.state.attributes.DockStatusStateAttribute({
+                            value: entities.state.attributes.DockStatusStateAttribute.VALUE.IDLE
+                        }));
+                }
+            }
+        }
 
         if (data["state"] !== undefined && STATUS_MAP[data["state"]]) {
             let statusValue = STATUS_MAP[data["state"]].value;
             let statusFlag = STATUS_MAP[data["state"]].flag;
+            let statusError = undefined;
             let statusMetaData = {};
 
             if (
@@ -187,24 +277,47 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
             ) {
                 statusFlag = stateAttrs.StatusStateAttribute.FLAG.RESUMABLE;
 
-                if (data["in_cleaning"] === 2) {
+                if (data["in_cleaning"] === undefined) {
+                    const previousState = this.state.getFirstMatchingAttributeByConstructor(stateAttrs.StatusStateAttribute);
+
+                    // keep statusFlag and metaData from previous state
+                    if (previousState &&
+                        (
+                            previousState.value === stateAttrs.StatusStateAttribute.VALUE.PAUSED ||
+                            previousState.value === stateAttrs.StatusStateAttribute.VALUE.RETURNING ||
+                            previousState.value === stateAttrs.StatusStateAttribute.VALUE.DOCKED
+                        )
+                    ) {
+                        statusFlag = previousState.flag;
+
+                        if (previousState.metaData.zoned === true) {
+                            statusMetaData.zoned = true;
+                        } else if (previousState.metaData.segment_cleaning === true) {
+                            statusMetaData.segment_cleaning = true;
+                        }
+                    }
+                } else if (data["in_cleaning"] === 2) {
                     //Since this is some roborock-related weirdness, we're using the metaData to store this
                     statusMetaData.zoned = true;
                 } else if (data["in_cleaning"] === 3) {
                     statusMetaData.segment_cleaning = true;
                 }
             } else if (statusValue === stateAttrs.StatusStateAttribute.VALUE.ERROR) {
-                statusMetaData.error_code = data["error_code"];
-                statusMetaData.error_description = GET_ERROR_CODE_DESCRIPTION(data["error_code"]);
+                statusError = RoborockValetudoRobot.MAP_ERROR_CODE(data["error_code"]);
             }
 
             newStateAttr = new stateAttrs.StatusStateAttribute({
                 value: statusValue,
                 flag: statusFlag,
+                error: statusError,
                 metaData: statusMetaData
             });
 
             this.state.upsertFirstMatchingAttribute(newStateAttr);
+
+            if (newStateAttr.isActiveState) {
+                this.pollMap();
+            }
         }
 
         if (data["battery"] !== undefined) {
@@ -233,55 +346,57 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
             }));
         }
 
-        if (data["clean_area"] !== undefined) { //TODO: actually not an attribute. Use Job
-            this.state.upsertFirstMatchingAttribute(new stateAttrs.LatestCleanupStatisticsAttribute({
-                type: stateAttrs.LatestCleanupStatisticsAttribute.TYPE.AREA,
-                value: Math.round(parseInt(data["clean_area"]) / 100)
-            }));
+        if (data["clean_area"] !== undefined) {
+            this.capabilities[capabilities.RoborockCurrentStatisticsCapability.TYPE].currentStatistics.area = Math.round(parseInt(data["clean_area"]) / 100);
         }
-
         if (data["clean_time"] !== undefined) {
-            this.state.upsertFirstMatchingAttribute(new stateAttrs.LatestCleanupStatisticsAttribute({
-                type: stateAttrs.LatestCleanupStatisticsAttribute.TYPE.DURATION,
-                value: data["clean_time"]
-            }));
+            this.capabilities[capabilities.RoborockCurrentStatisticsCapability.TYPE].currentStatistics.time = parseInt(data["clean_time"]);
         }
 
-        //TODO: Move to S5 Implementation
-        let persistentMapSetting = stateAttrs.PersistentMapSettingStateAttribute.VALUE.DISABLED;
-        if (data["lab_status"] === 1) {
-            persistentMapSetting = stateAttrs.PersistentMapSettingStateAttribute.VALUE.ENABLED;
+        if (data["lab_status"] !== undefined && this.hasCapability(capabilities.RoborockPersistentMapControlCapability.TYPE)) {
+            /*
+                lab_status is a byte that consists of
+
+                XXXXXXMP
+
+                X is currently (2022-02-21) unused
+                M is the multi-map flag
+                P is the persistent-map flag
+             */
+
+            this.labStatus = {
+                persistentMapEnabled: !!(data["lab_status"] & 0b00000001),
+                multiMapEnabled: !!(data["lab_status"] & 0b00000010)
+            };
         }
 
-        this.state.upsertFirstMatchingAttribute(new stateAttrs.PersistentMapSettingStateAttribute({
-            value: persistentMapSetting
-        }));
-
-        if (data["water_box_status"] !== undefined) {
+        if (
+            data["water_box_status"] !== undefined &&
+            supportedAttachments.includes(stateAttrs.AttachmentStateAttribute.TYPE.WATERTANK)
+        ) {
             this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
                 type: stateAttrs.AttachmentStateAttribute.TYPE.WATERTANK,
                 attached: data["water_box_status"] === 1
             }));
+        }
 
-            if (data["water_box_carriage_status"] !== undefined) {
-                this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
-                    type: stateAttrs.AttachmentStateAttribute.TYPE.MOP,
-                    attached: data["water_box_carriage_status"] === 1
-                }));
-            } else {
-                this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
-                    type: stateAttrs.AttachmentStateAttribute.TYPE.MOP,
-                    attached: data["water_box_status"] === 1
-                }));
-            }
-
+        if (
+            data["water_box_carriage_status"] !== undefined &&
+            supportedAttachments.includes(stateAttrs.AttachmentStateAttribute.TYPE.MOP)
+        ) {
+            this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
+                type: stateAttrs.AttachmentStateAttribute.TYPE.MOP,
+                attached: data["water_box_carriage_status"] === 1
+            }));
         }
 
         //data["dnd_enabled"]
         //data["map_present"]
 
         if (data["fan_power"] !== undefined) {
-            let matchingFanSpeed = Object.keys(this.fanSpeeds).find(key => this.fanSpeeds[key] === data["fan_power"]);
+            let matchingFanSpeed = Object.keys(this.fanSpeeds).find(key => {
+                return this.fanSpeeds[key] === data["fan_power"];
+            });
             if (!matchingFanSpeed) {
                 matchingFanSpeed = stateAttrs.PresetSelectionStateAttribute.INTENSITY.CUSTOM;
             }
@@ -294,7 +409,9 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
         }
 
         if (data["water_box_mode"] !== undefined) {
-            let matchingWaterGrade = Object.keys(this.waterGrades).find(key => this.waterGrades[key] === data["water_box_mode"]);
+            let matchingWaterGrade = Object.keys(this.waterGrades).find(key => {
+                return this.waterGrades[key] === data["water_box_mode"];
+            });
             if (!matchingWaterGrade) {
                 matchingWaterGrade = stateAttrs.PresetSelectionStateAttribute.INTENSITY.CUSTOM;
             }
@@ -306,68 +423,74 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
             }));
         }
 
+        if (data["map_status"] !== undefined) {
+            /*
+                map_status is a byte that consists of
+
+                IIIIIISM
+
+                I being all part of the current mapId 0-63
+                S being a "segment present" flag
+                M being a "map present" flag
+             */
+
+            this.mapStatus = {
+                mapPresent: !!(data["map_status"] & 0b00000001),
+                segmentsPresent: !!(data["map_status"] & 0b00000010),
+                mapSlotId: data["map_status"] >> 2
+            };
+        }
+
         this.emitStateAttributesUpdated();
     }
 
-    pollMap() {
-        // Guard against multiple concurrent polls.
-        if (this.pollingMap) {
-            return;
-        }
+    async executeMapPoll() {
+        let result;
+        try {
+            result = await this.sendCommand(this.mapPollMiioCommand);
 
-        const now = new Date();
-        if (now.getTime() - 600 > this.lastMapPoll.getTime()) {
-            this.pollingMap = true;
-            this.lastMapPoll = now;
-
-            // Clear pending timeout, since we’re starting a new poll right now.
-            if (this.pollMapTimeout) {
-                clearTimeout(this.pollMapTimeout);
+            if (result?.[0] === "retry" && this.mapPollMiioCommand === MAP_POLL_COMMANDS.GetFreshMap) {
+                result = await this.sendCommand(MAP_POLL_COMMANDS.GetMap);
             }
-
-            this.sendCloud({"method": "get_map_v1"}).then(res => {
-                if (res?.length === 1) {
-                    let repollSeconds = 60;
-
-                    let StatusStateAttribute = this.state.getFirstMatchingAttribute({
-                        attributeClass: stateAttrs.StatusStateAttribute.name
-                    });
-
-                    if (StatusStateAttribute && StatusStateAttribute.isActiveState) {
-                        repollSeconds = 2;
-                    }
-
-                    if (res && res[0] === "retry") {
-                        /**
-                         * This fixes the map not being available on boot for another 60 seconds which is annoying
-                         */
-                        if (this.state.map?.metaData?.defaultMap !== true) {
-                            repollSeconds += 1;
-                        } else {
-                            repollSeconds = 2;
-                        }
-                    }
-
-                    setTimeout(() => this.pollMap(), repollSeconds * 1000);
-                }
-            }, err => {
-                // ¯\_(ツ)_/¯
-            }).finally(() => {
-                this.pollingMap = false;
-            });
+        } catch (e) {
+            if (!(e instanceof MiioDummycloudNotConnectedError)) {
+                throw e;
+            }
         }
 
-        this.pollMapTimeout = setTimeout(() => this.pollMap(), 5 * 60 * 1000); // 5 minutes
+        if (result === "unknown_method" && this.mapPollMiioCommand === MAP_POLL_COMMANDS.GetFreshMap) {
+            Logger.warn(`"${this.mapPollMiioCommand}" is not supported by your firmware. Falling back to "${MAP_POLL_COMMANDS.GetMap}".`);
+            this.mapPollMiioCommand = MAP_POLL_COMMANDS.GetMap;
+
+            return this.executeMapPoll();
+        }
+
+        return result;
+    }
+
+    determineNextMapPollInterval(pollResponse) {
+        let repollSeconds = super.determineNextMapPollInterval();
+
+        if (pollResponse?.length === 1) {
+            if (pollResponse && pollResponse[0] === "retry") {
+                if (this.state.map?.metaData?.defaultMap !== true) {
+                    repollSeconds += 1;
+                } else {
+                    // This fixes the map not being available on boot for another 60 seconds
+                    repollSeconds = RoborockValetudoRobot.MAP_POLLING_INTERVALS.ACTIVE;
+                }
+            }
+        }
+
+        return repollSeconds;
     }
 
     preprocessMap(data) {
-        return new Promise((resolve, reject) => {
-            zlib.gunzip(data, (err, result) => err ? reject(err) : resolve(result));
-        });
+        return RoborockMapParser.PREPROCESS(data);
     }
 
     async parseMap(data) {
-        const parsedMap = RRMapParser.PARSE(data);
+        const parsedMap = RoborockMapParser.PARSE(data);
 
         if (parsedMap instanceof ValetudoMap) {
             this.state.map = parsedMap;
@@ -398,21 +521,72 @@ class RoborockValetudoRobot extends MiioValetudoRobot {
         super.startup();
 
         if (this.config.get("embedded") === true) {
-            try {
-                const os_release = fs.readFileSync("/etc/os-release").toString();
-                const parsedFile = /^ROBOROCK_VERSION=(?<version>[\d._]*)$/m.exec(os_release);
+            const firmwareVersion = this.getFirmwareVersion();
 
-                if (parsedFile !== null && parsedFile.groups && parsedFile.groups.version) {
-                    Logger.info("Firmware Version: " + parsedFile.groups.version);
+            if (firmwareVersion) {
+                Logger.info("Firmware Version: " + firmwareVersion);
+            }
+
+
+            try {
+                const parsedCmdline = LinuxTools.READ_PROC_CMDLINE();
+
+                if (parsedCmdline.partitions[parsedCmdline.root]) {
+                    Logger.info(`Current rootfs: ${parsedCmdline.partitions[parsedCmdline.root]} (${parsedCmdline.root})`);
                 }
             } catch (e) {
-                Logger.warn("Unable to determine the Firmware Version", e);
+                Logger.warn("Unable to read /proc/cmdline", e);
             }
         }
     }
 
     getManufacturer() {
-        return "Beijing Roborock Technology Co., Ltd.";
+        return "Roborock";
+    }
+
+    /**
+     * @protected
+     * @returns {string | null}
+     */
+    getFirmwareVersion() {
+        try {
+            const os_release = fs.readFileSync("/etc/os-release").toString();
+            const parsedFile = /^ROBOROCK_VERSION=(?<version>[\d._]*)$/m.exec(os_release);
+
+            if (parsedFile !== null && parsedFile.groups && parsedFile.groups.version) {
+                return parsedFile.groups.version.split("_")?.[1];
+            } else {
+                Logger.warn("Unable to determine the Firmware Version");
+
+                return null;
+            }
+        } catch (e) {
+            Logger.warn("Unable to determine the Firmware Version", e);
+
+            return null;
+        }
+    }
+
+    /**
+     * @return {object}
+     */
+    getProperties() {
+        const superProps = super.getProperties();
+        const ourProps = {};
+
+        if (this.config.get("embedded") === true) {
+            const firmwareVersion = this.getFirmwareVersion();
+
+            if (firmwareVersion) {
+                ourProps[RoborockValetudoRobot.WELL_KNOWN_PROPERTIES.FIRMWARE_VERSION] = firmwareVersion;
+            }
+        }
+
+        return Object.assign(
+            {},
+            superProps,
+            ourProps
+        );
     }
 }
 
@@ -485,6 +659,19 @@ const STATUS_MAP = {
         value: stateAttrs.StatusStateAttribute.VALUE.CLEANING,
         flag: stateAttrs.StatusStateAttribute.FLAG.SEGMENT
     },
+    23: {
+        value: stateAttrs.StatusStateAttribute.VALUE.DOCKED
+    },
+    25: {
+        value: stateAttrs.StatusStateAttribute.VALUE.RETURNING
+    },
+    26: {
+        value: stateAttrs.StatusStateAttribute.VALUE.RETURNING
+    },
+    29: {
+        value: stateAttrs.StatusStateAttribute.VALUE.MOVING,
+        flag: stateAttrs.StatusStateAttribute.FLAG.MAPPING
+    },
     100: {
         value: stateAttrs.StatusStateAttribute.VALUE.DOCKED
     },
@@ -493,44 +680,395 @@ const STATUS_MAP = {
     }
 };
 
-const ERROR_CODES = {
-    0: "No error",
-    1: "LDS jammed",
-    2: "Stuck front bumper",
-    3: "Wheel lost floor contact. Robot is on the verge of falling",
-    4: "Cliff sensor dirty or robot on the verge of falling",
-    5: "Main brush jammed",
-    6: "Side brush jammed",
-    7: "Wheel jammed",
-    8: "Robot stuck or trapped",
-    9: "Dustbin missing",
-    10: "Filter jammed",
-    11: "Magnetic interference",
-    12: "Low battery",
-    13: "Charging issues",
-    14: "Battery temperature out of operating range",
-    15: "Wall sensor dirty",
-    16: "Tilted robot",
-    17: "Side brush error. Reboot required",
-    18: "Fan error. Reboot required",
-    19: "Charging station without power",
-    21: "LDS bumper jammed",
-    22: "Charging contacts dirty",
-    23: "Charging station dirty",
-    24: "Stuck inside restricted area",
-    25: "Camera dirty",
-    26: "Wall sensor dirty",
-    29: "Animal excrements detected"
+/**
+ * 
+ * @param {number} vendorErrorCode
+ * 
+ * @returns {ValetudoRobotError}
+ */
+RoborockValetudoRobot.MAP_ERROR_CODE = (vendorErrorCode) => {
+    const parameters = {
+        severity: {
+            kind: ValetudoRobotError.SEVERITY_KIND.UNKNOWN,
+            level: ValetudoRobotError.SEVERITY_LEVEL.UNKNOWN,
+        },
+        subsystem: ValetudoRobotError.SUBSYSTEM.UNKNOWN,
+        message: `Unknown error ${vendorErrorCode}`,
+        vendorErrorCode: typeof vendorErrorCode === "number" ? vendorErrorCode.toString() : `unknown (${vendorErrorCode})`
+    };
 
-    //TODO: there are also 100+ codes. No idea when they might appear though
-};
+    switch (vendorErrorCode) {
+        case 0:
+            parameters.message = "No error";
+            break;
+        case 1:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "LDS jammed";
+            break;
+        case 2:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Stuck front bumper";
+            break;
+        case 3:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.CORE;
+            parameters.message = "Wheel lost floor contact";
+            break;
+        case 4:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Cliff sensor dirty or robot on the verge of falling";
+            break;
+        case 5:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Main brush jammed";
+            break;
+        case 6:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Side brush jammed";
+            break;
+        case 7:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Wheel jammed";
+            break;
+        case 8:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.NAVIGATION;
+            parameters.message = "Robot stuck or trapped";
+            break;
+        case 9:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.ATTACHMENTS;
+            parameters.message = "Dustbin missing";
+            break;
+        case 10:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.ATTACHMENTS;
+            parameters.message = "Filter jammed";
+            break;
+        case 11:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.INFO;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Magnetic interference";
+            break;
+        case 12:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.INFO;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Low battery";
+            break;
+        case 13:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Charging error";
+            break;
+        case 14:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Battery temperature out of operating range";
+            break;
+        case 15:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Wall sensor dirty";
+            break;
+        case 16:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Tilted robot";
+            break;
+        case 17:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Side brush error. Reboot required";
+            break;
+        case 18:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Fan error. Reboot required";
+            break;
+        case 19:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Charging station without power";
+            break;
+        //20?
+        case 21:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "LDS bumper jammed";
+            break;
+        case 22:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Charging contacts dirty";
+            break;
+        case 23:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.ERROR;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Charging station dirty";
+            break;
+        case 24:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.NAVIGATION;
+            parameters.message = "Stuck inside restricted area";
+            break;
+        case 25:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Camera dirty";
+            break;
+        case 26:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Wall sensor dirty";
+            break;
+        case 27:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.ATTACHMENTS;
+            parameters.message = "Mop module stuck";
+            break;
+        //28?
+        case 29:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.TRANSIENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.UNKNOWN;
+            parameters.message = "Animal excrements detected";
+            break;
 
-const GET_ERROR_CODE_DESCRIPTION = (errorCodeId) => {
-    if (ERROR_CODES[errorCodeId] !== undefined) {
-        return ERROR_CODES[errorCodeId];
-    } else {
-        return "UNKNOWN ERROR CODE " + errorCodeId;
+        case 32:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Auto-Empty Dock dustbin or dust bag missing";
+            break;
+        case 34:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Auto-Empty Dock filter clogged";
+            break;
+
+        case 35:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Auto-Empty Dock voltage abnormal";
+            break;
+
+        case 38:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Mop Dock Clean Water Tank empty or not installed";
+            break;
+        case 39:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Mop Dock Wastewater Tank full or not installed";
+            break;
+        case 40:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Mop Dock Water Filter not installed";
+            break;
+        case 41:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Mop Dock Clean Water Tank empty";
+            break;
+        case 42:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Mop Dock Cleaning Brush jammed";
+            break;
+        case 44:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.WARNING;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.DOCK;
+            parameters.message = "Mop Dock Water Filter clogged";
+            break;
+
+        case 100:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.UNKNOWN;
+            parameters.message = "Unknown hardware fault";
+            break;
+        case 101:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.UNKNOWN;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Compass fault";
+            break;
+        case 102:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.UNKNOWN;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Right compass fault";
+            break;
+        case 103:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Main brush short circuit";
+            break;
+        case 104:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Main brush open circuit";
+            break;
+        case 105:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Left wheel short circuit";
+            break;
+        case 106:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Left wheel open circuit";
+            break;
+        case 107:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Right wheel short circuit";
+            break;
+        case 108:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Right wheel open circuit";
+            break;
+        case 109:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.MOTORS;
+            parameters.message = "Fan open circuit";
+            break;
+        case 110:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Motion tracking sensor initialization error";
+            break;
+        case 111:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Inertial measurement unit initialization error";
+            break;
+        case 112:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.POWER;
+            parameters.message = "Charging uC fault";
+            break;
+        case 113:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.CORE;
+            parameters.message = "NVRAM fault";
+            break;
+        case 114:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.CORE;
+            parameters.message = "Wi-Fi module fault 1";
+            break;
+        case 115:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.CORE;
+            parameters.message = "Wi-Fi module fault 2";
+            break;
+        case 116:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Odometer fault";
+            break;
+        case 117:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Left odometer fault";
+            break;
+        case 118:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Right odometer fault";
+            break;
+        case 119:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.CORE;
+            parameters.message = "Speaker fault";
+            break;
+        case 120:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Wall sensor initialization error";
+            break;
+        case 121:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Wall sensor fault";
+            break;
+        case 122:
+            parameters.severity.kind = ValetudoRobotError.SEVERITY_KIND.PERMANENT;
+            parameters.severity.level = ValetudoRobotError.SEVERITY_LEVEL.CATASTROPHIC;
+            parameters.subsystem = ValetudoRobotError.SUBSYSTEM.SENSORS;
+            parameters.message = "Wall sensor fault";
+            break;
     }
+
+    return new ValetudoRobotError(parameters);
 };
+
+const MAP_POLL_COMMANDS = Object.freeze({
+    GetMap: "get_map_v1",
+    GetFreshMap: "get_fresh_map_v1",
+});
 
 module.exports = RoborockValetudoRobot;

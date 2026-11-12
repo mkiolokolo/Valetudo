@@ -1,5 +1,4 @@
 const BasicControlCapability = require("../../../core/capabilities/BasicControlCapability");
-const Logger = require("../../../Logger");
 const MapSegmentationCapability = require("../../../core/capabilities/MapSegmentationCapability");
 
 const attributes = require("../ViomiCommonAttributes");
@@ -24,9 +23,25 @@ class ViomiMapSegmentationCapability extends MapSegmentationCapability {
      * @returns {Promise<void>}
      */
     async executeSegmentAction(segments, options) {
-        const segmentIds = segments.map(segment => parseInt(segment.id));
-        Logger.trace("segments to clean: ", segmentIds);
+        const segmentIds = segments.map(segment => {
+            return parseInt(segment.id);
+        });
+
+        if (options.iterations === 2) {
+            await this.robot.sendCommand("set_repeat", [1], {});
+        }
+
         await this.getBasicControlCapability().setModeWithSegments(attributes.ViomiOperation.START, segmentIds);
+    }
+
+    getProperties() {
+        return {
+            iterationCount: {
+                min: 1,
+                max: 2
+            },
+            customOrderSupport: false
+        };
     }
 }
 

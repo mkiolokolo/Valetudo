@@ -1,5 +1,4 @@
 const basicAuth = require("express-basic-auth");
-const bodyParser = require("body-parser");
 const compression = require("compression");
 const dynamicMiddleware = require("express-dynamic-middleware");
 const express = require("express");
@@ -8,36 +7,48 @@ const path = require("path");
 const swaggerUi = require("swagger-ui-express");
 const swaggerValidation = require("openapi-validator-middleware");
 
-const listEndpoints = require("express-list-endpoints");
-
 const Logger = require("../Logger");
 
+const notFoundPages = require("./res/404");
+
+const KillswitchRouter = require("./KillswitchRouter");
 const Middlewares = require("./middlewares");
 const RobotRouter = require("./RobotRouter");
 const ValetudoRouter = require("./ValetudoRouter");
 
 
 const fs = require("fs");
-const MiioValetudoRobot = require("../robots/MiioValetudoRobot");
+const MQTTRouter = require("./MQTTRouter");
+const NetworkAdvertisementManagerRouter = require("./NetworkAdvertisementManagerRouter");
 const NTPClientRouter = require("./NTPClientRouter");
 const SSDPRouter = require("./SSDPRouter");
 const SystemRouter = require("./SystemRouter");
 const TimerRouter = require("./TimerRouter");
+const Tools = require("../utils/Tools");
+const UpdaterRouter = require("./UpdaterRouter");
 const ValetudoEventRouter = require("./ValetudoEventRouter");
 
 class WebServer {
     /**
      * @param {object} options
      * @param {import("../core/ValetudoRobot")} options.robot
+     * @param {import("../mqtt/MqttController")} options.mqttController
+     * @param {import("../NetworkAdvertisementManager")} options.networkAdvertisementManager
      * @param {import("../NTPClient")} options.ntpClient
+     * @param {import("../updater/Updater")} options.updater
+     * @param {import("../scheduler/Scheduler")} options.scheduler
      * @param {import("../ValetudoEventStore")} options.valetudoEventStore
      * @param {import("../Configuration")} options.config
+     * @param {import("../PhoenixManager")} options.phoenixManager
+     * @param {import("../utils/ValetudoHelper")} options.valetudoHelper
      */
     constructor(options) {
         const self = this;
 
         this.robot = options.robot;
         this.config = options.config;
+        this.phoenixManager = options.phoenixManager;
+        this.valetudoHelper = options.valetudoHelper;
 
         this.valetudoEventStore = options.valetudoEventStore;
 
@@ -45,14 +56,29 @@ class WebServer {
 
         this.port = this.webserverConfig.port;
 
-        this.basicAuthInUse = false; //TODO: redo auth with jwt or something like that
+        this.basicAuthInUse = false; //TODO: redo auth
 
         this.app = express();
         this.app.use(compression());
-        this.app.use(bodyParser.json());
+        this.app.use(express.json());
 
         this.app.disable("x-powered-by");
+
+        this.app.use(Middlewares.CSPMiddleware);
         this.app.use(Middlewares.VersionMiddleware);
+        this.app.use(Middlewares.ServerMiddleware);
+
+        if (this.webserverConfig.blockExternalAccess) {
+            this.app.use(Middlewares.ExternalAccessCheckMiddleware);
+        }
+
+        this.app.use(Middlewares.EggTermMiddleware);
+
+        // Intentionally bypasses auth
+        this.app.use(
+            "/_killswitch",
+            new KillswitchRouter({robot: this.robot}).getRouter()
+        );
 
         const authMiddleware = this.createAuthMiddleware();
         const dynamicAuth = dynamicMiddleware.create([]);
@@ -80,8 +106,18 @@ class WebServer {
         const server = http.createServer(this.app);
 
         this.loadApiSpec();
-        this.validator = function noOpValidationMiddleware(req, res, next) {
-            next();
+        this.validator = function superBasicValidationMiddleware(req, res, next) {
+            // We can save a lot of code in our routers by always at least making sure that req.body exists
+            // even if it is not being validated by the schema
+            if (req.method === "PUT" || req.method === "POST") {
+                if (Tools.IS_EMPTY_OBJECT_OR_UNDEFINED_OR_NULL(req.body)) {
+                    res.sendStatus(400);
+                } else {
+                    next();
+                }
+            } else {
+                next();
+            }
         };
 
         if (this.openApiSpec) {
@@ -93,74 +129,47 @@ class WebServer {
             this.validator = swaggerValidation.validate;
         }
 
-
-        // Allow enabling capability to send custom miio commands over the REST API, for debugging purposes only
-        let enableDebugCapability = false;
-        if (this.config.get("debug") && typeof this.config.get("debug").enableDebugCapability === "boolean") {
-            enableDebugCapability = this.config.get("debug").enableDebugCapability;
-        }
-        if (enableDebugCapability) {
-            Logger.warn("Raw command capability is enabled. This feature should only be used by developers.");
-        }
-
-        this.robotRouter = new RobotRouter({robot: this.robot, enableDebugCapability: enableDebugCapability, validator: this.validator});
+        this.robotRouter = new RobotRouter({robot: this.robot, validator: this.validator});
+        this.valetudoRouter = new ValetudoRouter({config: this.config, robot: this.robot, validator: this.validator});
 
         this.app.use("/api/v2/robot/", this.robotRouter.getRouter());
 
-        this.app.use("/api/v2/valetudo/", new ValetudoRouter({config: this.config, validator: this.validator}).getRouter());
+        this.app.use("/api/v2/valetudo/", this.valetudoRouter.getRouter());
+
+        this.app.use("/api/v2/mqtt/", new MQTTRouter({config: this.config, mqttController: options.mqttController, validator: this.validator}).getRouter());
+
+        this.app.use("/api/v2/networkadvertisement/", new NetworkAdvertisementManagerRouter({config: this.config, networkAdvertisementManager: options.networkAdvertisementManager, validator: this.validator}).getRouter());
 
         this.app.use("/api/v2/ntpclient/", new NTPClientRouter({config: this.config, ntpClient: options.ntpClient, validator: this.validator}).getRouter());
 
-        this.app.use("/api/v2/timers/", new TimerRouter({config: this.config, robot: this.robot, validator: this.validator}).getRouter());
+        this.app.use("/api/v2/timers/", new TimerRouter({config: this.config, robot: this.robot, validator: this.validator, scheduler: options.scheduler}).getRouter());
 
-        this.app.use("/api/v2/system/", new SystemRouter({}).getRouter());
+        this.app.use("/api/v2/system/", new SystemRouter({phoenixManager: this.phoenixManager}).getRouter());
 
         this.app.use("/api/v2/events/", new ValetudoEventRouter({valetudoEventStore: this.valetudoEventStore, validator: this.validator}).getRouter());
 
-        this.app.use("/_ssdp/", new SSDPRouter({config: this.config, robot: this.robot}).getRouter());
+        this.app.use("/api/v2/updater/", new UpdaterRouter({config: this.config, updater: options.updater, validator: this.validator}).getRouter());
 
-        // TODO: This should point at a build
-        this.app.use(express.static(path.join(__dirname, "../../..", "frontend/lib")));
+        this.app.use("/_ssdp/", new SSDPRouter({config: this.config, robot: this.robot, valetudoHelper: this.valetudoHelper}).getRouter());
+
+        this.app.use(express.static(path.join(__dirname, "../../..", "frontend/build")));
 
 
-        this.app.get("/api/v2", (req, res) => {
-            let endpoints = listEndpoints(this.app);
-            let endpointsMap;
-            endpoints = endpoints.sort((a,b) => (a.path > b.path) ? 1 : ((b.path > a.path) ? -1 : 0));
-            endpointsMap = endpoints.reduce((acc, curr) => {
-                acc[curr.path] = {methods: curr.methods}; return acc;
-            }, {});
+        this.robot.initModelSpecificWebserverRoutes(this.app);
 
-            if (this.openApiSpec) {
-                this.compareApiSpecWithReality(endpointsMap);
-            }
-
-            res.json(endpointsMap);
-        });
-
-        /*
-            TODO: MOVE THIS HACK ELSEWHERE!
-
-             This is a hack for miio vacuums with a recent miio_client
-
-             To properly spoof the http_dns request, we need to have this route on port 80 instead of the
-             miio-implementation specific second webserver on 8079 :/
-         */
-        if (this.robot instanceof MiioValetudoRobot) {
-            this.app.get("/gslb", (req, res) => {
-                //@ts-ignore
-                this.robot.handleHttpDnsRequest(req, res);
-            });
-        }
 
         this.app.use((err, req, res, next) => {
             if (err instanceof swaggerValidation.InputValidationError) {
-                Logger.warn("Received request with invalid payload", err.errors);
+                Logger.warn(`Received "${req.method} "to "${req.originalUrl}" with invalid payload`, err.errors);
                 res.status(400).json({message: "Request payload is invalid.", error: err.errors});
             } else {
                 Logger.error("Unhandled WebServer Error", err);
                 res.sendStatus(500);
             }
+        });
+
+        this.app.get("*splat", (req, res) => {
+            res.status(404).send(Tools.GET_RANDOM_ARRAY_ELEMENT(Object.values(notFoundPages)));
         });
 
         server.listen(this.port, function() {
@@ -208,6 +217,8 @@ class WebServer {
     shutdown() {
         return new Promise((resolve, reject) => {
             Logger.debug("Webserver shutdown in progress...");
+            this.robotRouter.shutdown();
+            this.valetudoRouter.shutdown();
 
             //closing the server
             this.webserver.close(() => {
@@ -227,56 +238,29 @@ class WebServer {
             spec = JSON.parse(fs.readFileSync(path.join(__dirname, "../res/valetudo.openapi.schema.json")).toString());
         } catch (e) {
             Logger.warn("Failed to load OpenApi spec. Swagger endpoint and payload validation will be unavailable.", e.message);
-        }
 
-        this.openApiSpec = spec;
-    }
-
-    /**
-     * This function is a convoluted mess which compares the actual available endpoints with the openAPI spec
-     * and checks for undocumented ones.
-     *
-     * We can't check for unimplemented but documented ones, because not all robots will have all capabilities
-     * and therefore not all endpoints will be available
-     *
-     * @private
-     * @param {object} endpoints
-     */
-    compareApiSpecWithReality(endpoints) {
-        if (!this.openApiSpec) {
             return;
         }
-        const openApiPaths = Object.keys(this.openApiSpec.paths);
 
 
-        Object.keys(endpoints).forEach((endpoint, i) => {
-            const endpointInOpenApiFormat = endpoint.replace(/:([\w-]+)/g,"{$1}").replace(/\?/g, "");
+        const capabilityRoutePathRegex = /\/api\/v2\/robot\/capabilities\/(?<capabilityName>[A-Za-z]+)/;
+        const supportedCapabilities = Object.keys(this.robot.capabilities);
 
-            if (!openApiPaths.includes(endpointInOpenApiFormat)) {
-                const ignoredEndpoints = [
-                    "/gslb", //miio-specific
-                    "/_ssdp/valetudo.xml",
-                    //soon to be removed
-                    "/api/v2/robot/capabilities/GoToLocationCapability/presets_legacy",
-                    "/api/v2/robot/capabilities/ZoneCleaningCapability/presets_legacy"
-                ];
+        Object.keys(spec.paths).forEach(pathName => {
+            const regexResult = capabilityRoutePathRegex.exec(pathName);
+            const capabilityName = regexResult?.groups?.capabilityName;
 
-                if (!ignoredEndpoints.includes(endpointInOpenApiFormat)) {
-                    Logger.debug("Found undocumented REST endpoint", {
-                        endpoint: endpointInOpenApiFormat
-                    });
-                }
-            } else {
-                endpoints[endpoint].methods.forEach(method => {
-                    if (!Object.keys(this.openApiSpec.paths[endpointInOpenApiFormat]).includes(method.toLowerCase())) {
-                        Logger.debug("Found undocumented HTTP method for REST endpoint", {
-                            endpoint: endpointInOpenApiFormat,
-                            method: method
-                        });
-                    }
-                });
+            if (capabilityName !== undefined && !supportedCapabilities.includes(capabilityName)) {
+                delete(spec.paths[pathName]);
             }
         });
+
+        spec.tags = spec.tags.filter(tag => {
+            return !(tag.name.endsWith("Capability") && !supportedCapabilities.includes(tag.name));
+        });
+
+
+        this.openApiSpec = spec;
     }
 }
 

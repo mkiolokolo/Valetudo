@@ -1,8 +1,12 @@
+const ComponentType = require("../homeassistant/ComponentType");
 const DataType = require("../homie/DataType");
-const HassAnchor = require("../homeassistant/HassAnchor");
+const DeviceClass = require("../homeassistant/DeviceClass");
+const EntityCategory = require("../homeassistant/EntityCategory");
+const InLineHassComponent = require("../homeassistant/components/InLineHassComponent");
 const PropertyMqttHandle = require("../handles/PropertyMqttHandle");
 const RobotStateNodeMqttHandle = require("../handles/RobotStateNodeMqttHandle");
 const stateAttrs = require("../../entities/state/attributes");
+const StateClass = require("../homeassistant/StateClass");
 const Unit = require("../common/Unit");
 
 class BatteryStateMqttHandle extends RobotStateNodeMqttHandle {
@@ -31,10 +35,29 @@ class BatteryStateMqttHandle extends RobotStateNodeMqttHandle {
                 if (batteryState === null) {
                     return null;
                 }
-                HassAnchor.getAnchor(HassAnchor.ANCHOR.BATTERY_LEVEL)
-                    .post(batteryState.level).then();
+
                 return batteryState.level;
             }
+        }).also((prop) => {
+            this.controller.withHass((hass => {
+                prop.attachHomeAssistantComponent(
+                    new InLineHassComponent({
+                        hass: hass,
+                        robot: this.robot,
+                        name: "battery_level",
+                        friendlyName: "Battery level",
+                        componentType: ComponentType.SENSOR,
+                        autoconf: {
+                            state_topic: prop.getBaseTopic(),
+                            icon: "mdi:battery",
+                            entity_category: EntityCategory.DIAGNOSTIC,
+                            unit_of_measurement: Unit.PERCENT,
+                            device_class: DeviceClass.BATTERY,
+                            state_class: StateClass.MEASUREMENT
+                        }
+                    })
+                );
+            }));
         }));
 
         this.registerChild(new PropertyMqttHandle({
@@ -49,8 +72,7 @@ class BatteryStateMqttHandle extends RobotStateNodeMqttHandle {
                 if (batteryState === null) {
                     return null;
                 }
-                await HassAnchor.getAnchor(HassAnchor.ANCHOR.BATTERY_CHARGING)
-                    .post(batteryState.flag === stateAttrs.BatteryStateAttribute.FLAG.CHARGING);
+
                 return batteryState.flag;
             }
         }));

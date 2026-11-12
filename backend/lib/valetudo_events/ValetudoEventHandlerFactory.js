@@ -13,7 +13,7 @@ class ValetudoEventHandlerFactory {
     /**
      *
      * @param {import("./events/ValetudoEvent")} event
-     * @returns {import("./handlers/ValetudoEventHandler")}
+     * @returns {import("./handlers/ValetudoEventHandler") | undefined}
      */
     getHandlerForEvent(event) {
         if (event instanceof events.DismissibleValetudoEvent) {
@@ -32,6 +32,8 @@ class ValetudoEventHandlerFactory {
                 event: event
             });
         }
+
+        return undefined; // Explicit to make eslint happy
     }
 }
 

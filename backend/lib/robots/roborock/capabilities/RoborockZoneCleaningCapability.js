@@ -1,31 +1,29 @@
-const RRMapParser = require("../RRMapParser");
+const RoborockMapParser = require("../RoborockMapParser");
 const ZoneCleaningCapability = require("../../../core/capabilities/ZoneCleaningCapability");
 
 /**
  * @extends ZoneCleaningCapability<import("../RoborockValetudoRobot")>
  */
 class RoborockZoneCleaningCapability extends ZoneCleaningCapability {
-    /**
-     * @param {Array<import("../../../entities/core/ValetudoZone")>} valetudoZones
-     * @returns {Promise<void>}
-     */
-    async start(valetudoZones) {
-        const flippedRoborockZones = valetudoZones.map(valetudoZone => {
+    async start(options) {
+        const flippedRoborockZones = options.zones.map(valetudoZone => {
             const yFlippedZone = [
                 Math.floor(valetudoZone.points.pA.x * 10),
-                Math.floor(RRMapParser.DIMENSION_MM - valetudoZone.points.pA.y * 10),
+                Math.floor(RoborockMapParser.DIMENSION_MM - valetudoZone.points.pA.y * 10),
                 Math.floor(valetudoZone.points.pC.x * 10),
-                Math.floor(RRMapParser.DIMENSION_MM - valetudoZone.points.pC.y * 10),
-                valetudoZone.iterations
+                Math.floor(RoborockMapParser.DIMENSION_MM - valetudoZone.points.pC.y * 10),
+                options.iterations ?? 1
             ];
 
             // it seems as the vacuum only works with 'positive rectangles'! So flip the coordinates if the user entered them wrong.
             // x1 has to be < x2 and y1 < y2
             return [
-                yFlippedZone[0] > yFlippedZone[2] ? yFlippedZone[2] : yFlippedZone[0],
-                yFlippedZone[1] > yFlippedZone[3] ? yFlippedZone[3] : yFlippedZone[1],
-                yFlippedZone[0] > yFlippedZone[2] ? yFlippedZone[0] : yFlippedZone[2],
-                yFlippedZone[1] > yFlippedZone[3] ? yFlippedZone[1] : yFlippedZone[3],
+                Math.min(yFlippedZone[0], yFlippedZone[2]),
+                Math.min(yFlippedZone[1], yFlippedZone[3]),
+
+                Math.max(yFlippedZone[0], yFlippedZone[2]),
+                Math.max(yFlippedZone[1], yFlippedZone[3]),
+
                 yFlippedZone[4]
             ];
         });

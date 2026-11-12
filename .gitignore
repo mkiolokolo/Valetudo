@@ -10,5 +10,11 @@ build/
 # IntelliJ Idea project files
 .idea/
 
+# VSCode project files
+.vscode/
 
 /backend/lib/res/valetudo.openapi.schema.json
+/backend/lib/res/build_metadata.json
+/backend/lib/robots/midea/generated/midea_protobufs.js
+
+/docs/dist

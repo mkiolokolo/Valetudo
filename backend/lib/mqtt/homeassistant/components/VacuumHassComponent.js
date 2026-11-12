@@ -21,11 +21,10 @@ class VacuumHassComponent extends HassComponent {
     }
 
     getAutoconf() {
-        const result = {
-            name: this.hass.friendlyName,
-            schema: "state",
+        const autoconfPayload = {
+            name: "Robot",
+            default_entity_id: `${ComponentType.VACUUM}.${this.hass.objectId}`,
             supported_features: [
-                "battery",
                 "status",
                 "start",
                 "stop",
@@ -40,28 +39,51 @@ class VacuumHassComponent extends HassComponent {
             payload_stop: Commands.BASIC_CONTROL.STOP,
             payload_locate: Commands.HASS.LOCATE,
         };
-        if (this.robot.hasCapability(capabilities.FanSpeedControlCapability.TYPE)) {
-            result["supported_features"].push("fan_speed");
-            // Sent as a topic reference since this is used for the autoconfig
-            result["fan_speed_list"] = HassAnchor.getTopicReference(HassAnchor.REFERENCE.FAN_SPEED_PRESETS);
-            result["set_fan_speed_topic"] = HassAnchor.getTopicReference(HassAnchor.REFERENCE.FAN_SPEED_SET);
-        }
+
         if (this.locateCap !== undefined) {
-            result["supported_features"].push("locate");
+            autoconfPayload["supported_features"].push("locate");
         }
-        return result;
+
+        if (this.robot.hasCapability(capabilities.FanSpeedControlCapability.TYPE)) {
+            autoconfPayload["supported_features"].push("fan_speed");
+
+            // Sent as a topic reference since this is used for the autoconfig
+            autoconfPayload["fan_speed_list"] = this.hass.controller.hassAnchorProvider.getTopicReference(
+                HassAnchor.REFERENCE.FAN_SPEED_PRESETS
+            );
+            autoconfPayload["set_fan_speed_topic"] = this.hass.controller.hassAnchorProvider.getTopicReference(
+                HassAnchor.REFERENCE.FAN_SPEED_SET
+            );
+        }
+
+        if (this.robot.hasCapability(capabilities.MapSegmentationCapability.TYPE)) {
+            autoconfPayload["clean_segments_command_topic"] = this.hass.controller.hassAnchorProvider.getTopicReference(
+                HassAnchor.REFERENCE.CLEAN_SEGMENT_COMMAND
+            );
+            autoconfPayload["clean_segments_command_template"] = "{\"segment_ids\": {{value | to_json}}, \"customOrder\": true}";
+        }
+
+        return autoconfPayload;
     }
 
 
     getTopics() {
         const result = {
             "state": {
-                "state": HassAnchor.getAnchor(HassAnchor.ANCHOR.VACUUM_STATE),
-                "battery_level": HassAnchor.getAnchor(HassAnchor.ANCHOR.BATTERY_LEVEL),
+                "state": this.hass.controller.hassAnchorProvider.getAnchor(
+                    HassAnchor.ANCHOR.VACUUM_STATE
+                ),
             }
         };
         if (this.robot.hasCapability(capabilities.FanSpeedControlCapability.TYPE)) {
-            result.state.fan_speed = HassAnchor.getAnchor(HassAnchor.ANCHOR.FAN_SPEED);
+            result.state.fan_speed = this.hass.controller.hassAnchorProvider.getAnchor(
+                HassAnchor.ANCHOR.FAN_SPEED
+            );
+        }
+        if (this.robot.hasCapability(capabilities.MapSegmentationCapability.TYPE)) {
+            result.state.segments = this.hass.controller.hassAnchorProvider.getAnchor(
+                HassAnchor.ANCHOR.MAP_SEGMENTS
+            ) ?? {};
         }
         return result;
     }

@@ -1,6 +1,5 @@
-const MapSegmentationCapability = require("../../../core/capabilities/MapSegmentationCapability");
-
 const entities = require("../../../entities");
+const MapSegmentationCapability = require("../../../core/capabilities/MapSegmentationCapability");
 
 /**
  * @extends MapSegmentationCapability<import("../DreameValetudoRobot")>
@@ -23,6 +22,10 @@ class DreameMapSegmentationCapability extends MapSegmentationCapability {
      * @param {number} options.miot_properties.additionalCleanupParameters.piid
      *
      * @param {number} options.segmentCleaningModeId
+     * @param {number} options.iterationsSupported
+     * @param {boolean} options.customOrderSupported
+     * 
+     * @param {boolean} [options.newOrder]
      */
     constructor(options) {
         super(options);
@@ -31,6 +34,10 @@ class DreameMapSegmentationCapability extends MapSegmentationCapability {
         this.miot_properties = options.miot_properties;
 
         this.segmentCleaningModeId = options.segmentCleaningModeId;
+        this.iterationsSupported = options.iterationsSupported;
+        this.customOrderSupported = options.customOrderSupported;
+
+        this.newOrder = !!options.newOrder;
     }
     /**
      *
@@ -54,37 +61,30 @@ class DreameMapSegmentationCapability extends MapSegmentationCapability {
         let waterGrade = WaterGradeAttribute?.metaData?.rawValue ?? 1;
 
 
-        const mappedSegments = segments.map(segment => {
+        const mappedSegments = segments.map((segment, i) => {
             return [
                 parseInt(segment.id),
                 typeof options?.iterations === "number" ? options.iterations : 1,
                 fanSpeed,
                 waterGrade,
-                parseInt(segment.id) + 1 //no idea
+                this.newOrder ? 1 : i + 1 // on older robots, this determines the order in which the segments should be cleaned
             ];
         });
 
-        const res = await this.robot.sendCommand("action",
-            {
-                did: this.robot.deviceId,
-                siid: this.miot_actions.start.siid,
-                aiid: this.miot_actions.start.aiid,
-                in: [
-                    {
-                        piid: this.miot_properties.mode.piid,
-                        value: this.segmentCleaningModeId
-                    },
-                    {
-                        piid: this.miot_properties.additionalCleanupParameters.piid,
-                        value: JSON.stringify({"selects": mappedSegments})
-                    }
-                ]
-            }
+        await this.robot.miotHelper.executeAction(
+            this.miot_actions.start.siid,
+            this.miot_actions.start.aiid,
+            [
+                {
+                    piid: this.miot_properties.mode.piid,
+                    value: this.segmentCleaningModeId
+                },
+                {
+                    piid: this.miot_properties.additionalCleanupParameters.piid,
+                    value: JSON.stringify({"selects": mappedSegments})
+                }
+            ]
         );
-
-        if (res.code !== 0) {
-            throw new Error("Error code " + res.code);
-        }
     }
 
     /**
@@ -94,9 +94,9 @@ class DreameMapSegmentationCapability extends MapSegmentationCapability {
         return {
             iterationCount: {
                 min: 1,
-                max: 2
+                max: this.iterationsSupported
             },
-            customOrderSupport: true
+            customOrderSupport: this.customOrderSupported
         };
     }
 }

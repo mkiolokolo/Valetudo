@@ -1,202 +1,17 @@
 const capabilities = require("./capabilities");
 
+const DreameMiotServices = require("./DreameMiotServices");
 const DreameValetudoRobot = require("./DreameValetudoRobot");
 const entities = require("../../entities");
 const Logger = require("../../Logger");
 const MiioValetudoRobot = require("../MiioValetudoRobot");
+const ValetudoRestrictedZone = require("../../entities/core/ValetudoRestrictedZone");
 const ValetudoSelectionPreset = require("../../entities/core/ValetudoSelectionPreset");
 
 const stateAttrs = entities.state.attributes;
 
-//https://miot-spec.org/miot-spec-v2/instance?type=urn:miot-spec-v2:device:vacuum:0000A006:dreame-mc1808:1
-const MIOT_SERVICES = Object.freeze({
-    ERROR: {
-        SIID: 22,
-        PROPERTIES: {
-            CODE: {
-                PIID: 1
-            }
-        }
-    },
-    VACUUM_2: {
-        SIID: 18,
-        PROPERTIES: {
-            MODE: {
-                PIID: 1
-            },
-            FAN_SPEED: {
-                PIID: 6
-            },
-            WATER_USAGE: {
-                PIID: 20
-            },
-            WATER_TANK_ATTACHMENT: {
-                PIID: 9
-            },
-            TASK_STATUS: {
-                PIID: 18 // if robot has a task: value = 0
-            },
-            ADDITIONAL_CLEANUP_PROPERTIES: {
-                PIID: 21
-            },
-            PERSISTENT_MAPS: {
-                PIID: 23
-            }
-        },
-        ACTIONS: {
-            START: {
-                AIID: 1
-            },
-            PAUSE: {
-                AIID: 2
-            }
-        }
-    },
-    BATTERY: {
-        SIID: 2,
-        PROPERTIES: {
-            LEVEL: {
-                PIID: 1
-            },
-            CHARGING: {
-                PIID: 2
-            }
-        },
-        ACTIONS: {
-            START_CHARGE: {
-                AIID: 1
-            }
-        }
-    },
-    LOCATE: {
-        SIID: 17,
-        ACTIONS: {
-            LOCATE: {
-                AIID: 1
-            },
-            VOLUME_TEST: {
-                AIID: 3
-            }
-        }
-    },
-    VOICE: {
-        SIID: 24,
-        PROPERTIES: {
-            VOLUME: {
-                PIID: 1
-            },
-            ACTIVE_VOICEPACK: {
-                PIID: 3
-            },
-            URL: {
-                PIID: 4
-            },
-            HASH: {
-                PIID: 5
-            },
-            SIZE: {
-                PIID: 6
-            }
-        },
-        ACTIONS: {
-            DOWNLOAD_VOICEPACK: {
-                AIID: 2
-            }
-        }
-    },
-    AUDIO: {
-        SIID: 7,
-        PROPERTIES: {
-            VOLUME: {
-                PIID: 1
-            }
-        },
-        ACTIONS: {
-            VOLUME_TEST: {
-                AIID: 3
-            }
-        }
-    },
-    MAIN_BRUSH: {
-        SIID: 26,
-        PROPERTIES: {
-            TIME_LEFT: { //Hours
-                PIID: 1
-            },
-            PERCENT_LEFT: {
-                PIID: 2
-            }
-        },
-        ACTIONS: {
-            RESET: {
-                AIID: 1
-            }
-        }
-    },
-    SIDE_BRUSH: {
-        SIID: 28,
-        PROPERTIES: {
-            TIME_LEFT: { //Hours
-                PIID: 1
-            },
-            PERCENT_LEFT: {
-                PIID: 2
-            }
-        },
-        ACTIONS: {
-            RESET: {
-                AIID: 1
-            }
-        }
-    },
-    FILTER: {
-        SIID: 27,
-        PROPERTIES: {
-            TIME_LEFT: { //Hours
-                PIID: 2
-            },
-            PERCENT_LEFT: {
-                PIID: 1 //It's only swapped for the filter for some reason..
-            }
-        },
-        ACTIONS: {
-            RESET: {
-                AIID: 1
-            }
-        }
-    },
 
-
-    MAP: {
-        SIID: 23,
-        PROPERTIES: {
-            MAP_DATA: {
-                PIID: 1
-            },
-            FRAME_TYPE: { //Can be char I or P (numbers)
-                PIID: 2
-            },
-            CLOUD_FILE_NAME: {
-                PIID: 3
-            },
-            MAP_DETAILS: {
-                PIID: 4
-            },
-
-            ACTION_RESULT: {
-                PIID: 6 //TODO: validate
-            }
-        },
-        ACTIONS: {
-            POLL: {
-                AIID: 1
-            },
-            EDIT: {
-                AIID: 2
-            }
-        }
-    }
-});
+const MIOT_SERVICES = DreameMiotServices["1C"];
 
 
 
@@ -220,7 +35,12 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
             )
         );
 
-        this.lastMapPoll = new Date(0);
+        this.ephemeralState = {
+            mode: 0,
+            taskStatus: undefined,
+            isCharging: false,
+            errorCode: undefined
+        };
 
         this.registerCapability(new capabilities.Dreame1CBasicControlCapability({
             robot: this,
@@ -244,16 +64,42 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
             }
         }));
 
+        this.registerCapability(new capabilities.Dreame1CManualControlCapability({
+            robot: this,
+            miot_actions: {
+                move: {
+                    siid: MIOT_SERVICES.MANUAL_CONTROL.SIID,
+                    aiid: MIOT_SERVICES.MANUAL_CONTROL.ACTIONS.MOVE.AIID
+                },
+                stop: {
+                    siid: MIOT_SERVICES.MANUAL_CONTROL.SIID,
+                    aiid: MIOT_SERVICES.MANUAL_CONTROL.ACTIONS.STOP.AIID
+                }
+            },
+            miot_properties: {
+                angle: {
+                    piid: MIOT_SERVICES.MANUAL_CONTROL.PROPERTIES.ANGLE.PIID
+                },
+                velocity: {
+                    piid: MIOT_SERVICES.MANUAL_CONTROL.PROPERTIES.VELOCITY.PIID
+                }
+            }
+        }));
+
         this.registerCapability(new capabilities.DreameFanSpeedControlCapability({
             robot: this,
-            presets: Object.keys(DreameValetudoRobot.FAN_SPEEDS).map(k => new ValetudoSelectionPreset({name: k, value: DreameValetudoRobot.FAN_SPEEDS[k]})),
+            presets: Object.keys(DreameValetudoRobot.FAN_SPEEDS).map(k => {
+                return new ValetudoSelectionPreset({name: k, value: DreameValetudoRobot.FAN_SPEEDS[k]});
+            }),
             siid: MIOT_SERVICES.VACUUM_2.SIID,
             piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.FAN_SPEED.PIID
         }));
 
         this.registerCapability(new capabilities.DreameWaterUsageControlCapability({
             robot: this,
-            presets: Object.keys(DreameValetudoRobot.WATER_GRADES).map(k => new ValetudoSelectionPreset({name: k, value: DreameValetudoRobot.WATER_GRADES[k]})),
+            presets: Object.keys(DreameValetudoRobot.WATER_GRADES).map(k => {
+                return new ValetudoSelectionPreset({name: k, value: DreameValetudoRobot.WATER_GRADES[k]});
+            }),
             siid: MIOT_SERVICES.VACUUM_2.SIID,
             piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.WATER_USAGE.PIID
         }));
@@ -280,11 +126,17 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                     piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.ADDITIONAL_CLEANUP_PROPERTIES.PIID
                 }
             },
-            segmentCleaningModeId: 18
+            segmentCleaningModeId: 18,
+            iterationsSupported: 1,
+            customOrderSupported: true
         }));
 
-        this.registerCapability(new capabilities.DreameCombinedVirtualRestrictionsCapability({ //TODO: verify
+        this.registerCapability(new capabilities.DreameCombinedVirtualRestrictionsCapability({
             robot: this,
+            supportedRestrictedZoneTypes: [
+                ValetudoRestrictedZone.TYPE.REGULAR,
+                ValetudoRestrictedZone.TYPE.MOP
+            ],
             miot_actions: {
                 map_edit: {
                     siid: MIOT_SERVICES.MAP.SIID,
@@ -435,10 +287,60 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
             active_voicepack_piid: MIOT_SERVICES.VOICE.PROPERTIES.ACTIVE_VOICEPACK.PIID,
             size_piid: MIOT_SERVICES.VOICE.PROPERTIES.SIZE.PIID
         }));
+
+        this.registerCapability(new capabilities.DreameTotalStatisticsCapability({
+            robot: this,
+            miot_properties: {
+                time: {
+                    siid: MIOT_SERVICES.VACUUM_2.SIID,
+                    piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.TOTAL_STATISTICS_TIME.PIID
+                },
+                area: {
+                    siid: MIOT_SERVICES.VACUUM_2.SIID,
+                    piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.TOTAL_STATISTICS_AREA.PIID
+                },
+                count: {
+                    siid: MIOT_SERVICES.VACUUM_2.SIID,
+                    piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.TOTAL_STATISTICS_COUNT.PIID
+                }
+            }
+        }));
+
+        this.registerCapability(new capabilities.DreameCurrentStatisticsCapability({
+            robot: this,
+            miot_properties: {
+                time: {
+                    siid: MIOT_SERVICES.VACUUM_2.SIID,
+                    piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.CURRENT_STATISTICS_TIME.PIID
+                },
+                area: {
+                    siid: MIOT_SERVICES.VACUUM_2.SIID,
+                    piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.CURRENT_STATISTICS_AREA.PIID
+                }
+            }
+        }));
+
+        this.registerCapability(new capabilities.DreamePendingMapChangeHandlingCapability({
+            robot: this,
+            miot_actions: {
+                map_edit: {
+                    siid: MIOT_SERVICES.MAP.SIID,
+                    aiid: MIOT_SERVICES.MAP.ACTIONS.EDIT.AIID
+                }
+            },
+            miot_properties: {
+                mapDetails: {
+                    piid: MIOT_SERVICES.MAP.PROPERTIES.MAP_DETAILS.PIID
+                },
+                actionResult: {
+                    piid: MIOT_SERVICES.MAP.PROPERTIES.ACTION_RESULT.PIID
+                }
+            }
+        }));
     }
 
-    onMessage(msg) {
-        if (super.onMessage(msg) === true) {
+    onIncomingCloudMessage(msg) {
+        if (super.onIncomingCloudMessage(msg) === true) {
             return true;
         }
 
@@ -470,12 +372,16 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                     }
                 });
 
-                this.sendCloud({id: msg.id, "result":"ok"});
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
                 return true;
             }
             case "props":
                 if (msg.params && msg.params.ota_state) {
-                    this.sendCloud({id: msg.id, "result":"ok"});
+                    this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                        Logger.warn("Error while sending cloud ack", err);
+                    });
                     return true;
                 }
                 break;
@@ -489,11 +395,15 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                                 value: a.value
                             };
                         }));
-                        this.sendCloud({id: msg.id, "result":"ok"});
+                        this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                            Logger.warn("Error while sending cloud ack", err);
+                        });
                         break;
                     default:
                         Logger.debug("Unhandled event", msg);
-                        this.sendCloud({id: msg.id, "result":"ok"});
+                        this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                            Logger.warn("Error while sending cloud ack", err);
+                        });
                 }
 
                 return true;
@@ -504,7 +414,7 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
     }
 
     async pollState() {
-        const response = await this.sendCommand("get_properties", [
+        const response = await this.miotHelper.readProperties([
             {
                 siid: MIOT_SERVICES.VACUUM_2.SIID,
                 piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.MODE.PIID
@@ -534,14 +444,10 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                 piid: MIOT_SERVICES.BATTERY.PROPERTIES.LEVEL.PIID
             },
             {
-                siid: MIOT_SERVICES.VACUUM_2.SIID,
-                piid: MIOT_SERVICES.VACUUM_2.PROPERTIES.PERSISTENT_MAPS.PIID
+                siid: MIOT_SERVICES.BATTERY.SIID,
+                piid: MIOT_SERVICES.BATTERY.PROPERTIES.CHARGING.PIID
             }
-        ].map(e => {
-            e.did = this.deviceId; //TODO
-
-            return e;
-        }));
+        ]);
 
         if (response) {
             this.parseAndUpdateState(response);
@@ -557,30 +463,34 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
             return;
         }
 
-        data.forEach(elem => {
+        let statusNeedsUpdate = false;
+
+        for (const elem of data) {
             switch (elem.siid) {
                 case MIOT_SERVICES.ERROR.SIID: {
-                    this.errorCode = elem.value;
+                    this.ephemeralState.errorCode = typeof elem.value === "number" ? elem.value.toString() : elem.value;
 
-                    this.stateNeedsUpdate = true;
+                    statusNeedsUpdate = true;
                     break;
                 }
                 case MIOT_SERVICES.VACUUM_2.SIID: {
                     switch (elem.piid) {
                         case MIOT_SERVICES.VACUUM_2.PROPERTIES.MODE.PIID: {
-                            this.mode = elem.value;
+                            this.ephemeralState.mode = elem.value;
 
-                            this.stateNeedsUpdate = true;
+                            statusNeedsUpdate = true;
                             break;
                         }
                         case MIOT_SERVICES.VACUUM_2.PROPERTIES.TASK_STATUS.PIID: {
-                            this.taskStatus = elem.value;
+                            this.ephemeralState.taskStatus = elem.value;
 
-                            this.stateNeedsUpdate = true;
+                            statusNeedsUpdate = true;
                             break;
                         }
                         case MIOT_SERVICES.VACUUM_2.PROPERTIES.FAN_SPEED.PIID: {
-                            let matchingFanSpeed = Object.keys(DreameValetudoRobot.FAN_SPEEDS).find(key => DreameValetudoRobot.FAN_SPEEDS[key] === elem.value);
+                            let matchingFanSpeed = Object.keys(DreameValetudoRobot.FAN_SPEEDS).find(key => {
+                                return DreameValetudoRobot.FAN_SPEEDS[key] === elem.value;
+                            });
 
                             this.state.upsertFirstMatchingAttribute(new stateAttrs.PresetSelectionStateAttribute({
                                 metaData: {
@@ -593,7 +503,9 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                         }
 
                         case MIOT_SERVICES.VACUUM_2.PROPERTIES.WATER_USAGE.PIID: {
-                            let matchingWaterGrade = Object.keys(DreameValetudoRobot.WATER_GRADES).find(key => DreameValetudoRobot.WATER_GRADES[key] === elem.value);
+                            let matchingWaterGrade = Object.keys(DreameValetudoRobot.WATER_GRADES).find(key => {
+                                return DreameValetudoRobot.WATER_GRADES[key] === elem.value;
+                            });
 
                             this.state.upsertFirstMatchingAttribute(new stateAttrs.PresetSelectionStateAttribute({
                                 metaData: {
@@ -616,16 +528,6 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                             }));
                             break;
                         }
-                        case MIOT_SERVICES.VACUUM_2.PROPERTIES.PERSISTENT_MAPS.PIID: {
-                            this.state.upsertFirstMatchingAttribute(new entities.state.attributes.PersistentMapSettingStateAttribute({
-                                value: elem.value === 1 ? entities.state.attributes.PersistentMapSettingStateAttribute.VALUE.ENABLED :
-                                    entities.state.attributes.PersistentMapSettingStateAttribute.VALUE.DISABLED
-                            }));
-                            break;
-                        }
-
-                        default:
-                            Logger.warn("Unhandled VACUUM_2 property", elem);
                     }
                     break;
                 }
@@ -636,6 +538,16 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                                 level: elem.value
                             }));
                             break;
+                        case MIOT_SERVICES.BATTERY.PROPERTIES.CHARGING.PIID:
+                            /*
+                                1 = On Charger and charging
+                                2 = Not on Charger
+                                4 = On Charger and fully charged
+                                5 = Returning to Charger
+                             */
+                            this.ephemeralState.isCharging = elem.value === 4 || elem.value === 1;
+                            statusNeedsUpdate = true;
+                            break;
                     }
                     break;
                 }
@@ -645,39 +557,46 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
                 case MIOT_SERVICES.FILTER.SIID:
                     this.consumableMonitoringCapability.parseConsumablesMessage(elem);
                     break;
-
-
-                default:
-                    Logger.warn("Unhandled property update", elem);
             }
-        });
+        }
 
 
-        if (this.stateNeedsUpdate === true) {
+        if (statusNeedsUpdate === true) {
             let newState;
             let statusValue;
             let statusFlag;
+            let statusError;
             let statusMetaData = {};
 
-            if (this.errorCode === "0" || this.errorCode === "" || this.errorCode === 0 || this.errorCode === undefined) {
-                statusValue = DreameValetudoRobot.STATUS_MAP[this.mode].value;
-                statusFlag = DreameValetudoRobot.STATUS_MAP[this.mode].flag;
+            if (
+                this.ephemeralState.errorCode === "0" ||
+                this.ephemeralState.errorCode === "" ||
+                this.ephemeralState.errorCode === 0 ||
+                this.ephemeralState.errorCode === undefined
+            ) {
+                statusValue = DreameValetudoRobot.STATUS_MAP[this.ephemeralState.mode]?.value ?? stateAttrs.StatusStateAttribute.VALUE.IDLE;
+                statusFlag = DreameValetudoRobot.STATUS_MAP[this.ephemeralState.mode]?.flag;
 
-                if (statusValue === stateAttrs.StatusStateAttribute.VALUE.DOCKED && this.taskStatus === 0) {
+                if (this.ephemeralState.isCharging === true) {
+                    statusValue = stateAttrs.StatusStateAttribute.VALUE.DOCKED;
+                    statusFlag = undefined;
+                }
+
+                if (statusValue === stateAttrs.StatusStateAttribute.VALUE.DOCKED && this.ephemeralState.taskStatus === 0) {
                     // Robot has a pending task but is charging due to low battery and will resume when battery >= 80%
                     statusFlag = stateAttrs.StatusStateAttribute.FLAG.RESUMABLE;
                 }
             } else {
                 statusValue = stateAttrs.StatusStateAttribute.VALUE.ERROR;
 
-                statusMetaData.error_code = this.errorCode;
-                statusMetaData.error_description = DreameValetudoRobot.GET_ERROR_CODE_DESCRIPTION(this.errorCode);
+                statusError = DreameValetudoRobot.MAP_ERROR_CODE(this.ephemeralState.errorCode);
             }
 
             newState = new stateAttrs.StatusStateAttribute({
                 value: statusValue,
                 flag: statusFlag,
-                metaData: statusMetaData
+                metaData: statusMetaData,
+                error: statusError
             });
 
             this.state.upsertFirstMatchingAttribute(newState);
@@ -685,8 +604,6 @@ class Dreame1CValetudoRobot extends DreameValetudoRobot {
             if (newState.isActiveState) {
                 this.pollMap();
             }
-
-            this.stateNeedsUpdate = false;
         }
 
 

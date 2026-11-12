@@ -1,11 +1,15 @@
 const Logger = require("../Logger");
+const Tools = require("../utils/Tools");
+const ValetudoFanSpeedControlTimerPreAction = require("./pre_actions/ValetudoFanSpeedControlTimerPreAction");
 const ValetudoFullCleanupTimerAction = require("./actions/ValetudoFullCleanupTimerAction");
-const ValetudoGoToTimerAction = require("./actions/ValetudoGoToTimerAction");
-const ValetudoNTPClientDisabledState = require("../entities/core/ntpClient/ValetudoNTPClientDisabledState");
 const ValetudoNTPClientSyncedState = require("../entities/core/ntpClient/ValetudoNTPClientSyncedState");
+const ValetudoOperationModeControlTimerPreAction = require("./pre_actions/ValetudoOperationModeControlTimerPreAction");
 const ValetudoSegmentCleanupTimerAction = require("./actions/ValetudoSegmentCleanupTimerAction");
 const ValetudoTimer = require("../entities/core/ValetudoTimer");
-const ValetudoZoneCleanupTimerAction = require("./actions/ValetudoZoneCleanupTimerAction");
+const ValetudoWaterUsageControlTimerPreAction = require("./pre_actions/ValetudoWaterUsageControlTimerPreAction");
+const {sleep} = require("../utils/misc");
+
+const MS_PER_MIN = 60 * 1000;
 
 class Scheduler {
     /**
@@ -18,64 +22,87 @@ class Scheduler {
         this.config = options.config;
         this.robot = options.robot;
         this.ntpClient = options.ntpClient;
+        this.nextScheduledCheckTime = null;
 
         // We intentionally wait 60 seconds before the first evaluation, since this way we're probably
         // already connected to the vacuum
         this.timerEvaluationInterval = setInterval(() => {
             this.evaluateTimers();
-        }, 60*1000);
+        }, MS_PER_MIN);
     }
 
     evaluateTimers() {
-        const nowDate = new Date();
-        const now = {
-            dow: nowDate.getUTCDay(),
-            hour: nowDate.getUTCHours(),
-            minute: nowDate.getUTCMinutes()
-        };
+        const NTPClientStateIsValid = this.ntpClient.state instanceof ValetudoNTPClientSyncedState;
+        const isEmbedded = this.config.get("embedded") === true;
+        const hasBuildTimestamp = Tools.GET_BUILD_TIMESTAMP() > new Date(-1);
+        const timeIsPlausible = Tools.GET_BUILD_TIMESTAMP() < new Date();
 
-        if (
-            !(
-                this.ntpClient.state instanceof ValetudoNTPClientSyncedState ||
-                this.ntpClient.state instanceof ValetudoNTPClientDisabledState
-            ) && this.config.get("embedded") === true
-        ) {
-            // Since some robots have no rtc, we absolutely require a synced time when embedded
-            // Therefore, we're aborting without it unless you explicitly disable the NTPClient
-            // In that case you're on your own to provide the correct time to the robot
+        let shouldEvaluateTimers;
+        if (isEmbedded) {
+            shouldEvaluateTimers = NTPClientStateIsValid || (hasBuildTimestamp && timeIsPlausible);
+        } else {
+            if (hasBuildTimestamp) {
+                shouldEvaluateTimers = timeIsPlausible;
+            } else { // Probably dev env
+                shouldEvaluateTimers = true;
+            }
+        }
+
+        if (!shouldEvaluateTimers) {
             return;
         }
 
         const timers = this.config.get("timers");
 
-        Object.values(timers).forEach(/** @type {import("../entities/core/ValetudoTimer")} */ timerDefinition => {
-            if (
-                timerDefinition.enabled === true &&
-                timerDefinition.dow.includes(now.dow) &&
-                timerDefinition.hour === now.hour &&
-                timerDefinition.minute === now.minute
-            ) {
-                Logger.info("Executing timer " + timerDefinition.id);
-                this.executeTimer(timerDefinition);
-            }
-        });
+        const nowTime = new Date().getTime();
+
+        // nextScheduledCheckTime is invalid, either because we just started or because
+        // NTP moved us too far in time. In either case, make the following loop run only once.
+        if (this.nextScheduledCheckTime === null || this.nextScheduledCheckTime > nowTime || this.nextScheduledCheckTime < (nowTime - 60 * MS_PER_MIN)) {
+            this.nextScheduledCheckTime = nowTime - MS_PER_MIN;
+        }
+
+        // setInterval drifts. It has to, because that's how the JS event loop works.
+        // That could cause timer events to be missed, e.g. when evaluateTimers() is
+        // called in minute 10 and 59 seconds and the next time in minute 12 and 00
+        // seconds. To counteract this race condition, the following loop runs twice
+        // in such a case.
+        while (this.nextScheduledCheckTime < nowTime) {
+            const checkDate = new Date(this.nextScheduledCheckTime);
+            const checkTime = {
+                dow: checkDate.getUTCDay(),
+                hour: checkDate.getUTCHours(),
+                minute: checkDate.getUTCMinutes(),
+            };
+
+            Object.values(timers).forEach(/** @type {import("../entities/core/ValetudoTimer")} */ timerDefinition => {
+                if (
+                    timerDefinition.enabled === true &&
+                    timerDefinition.dow.includes(checkTime.dow) &&
+                    timerDefinition.hour === checkTime.hour &&
+                    timerDefinition.minute === checkTime.minute
+                ) {
+                    Logger.info("Executing timer " + timerDefinition.id);
+
+                    this.executeTimer(timerDefinition).catch(e => {
+                        Logger.error("Error while executing timer " + timerDefinition.id, e);
+                    });
+                }
+            });
+
+            this.nextScheduledCheckTime += MS_PER_MIN;
+        }
     }
 
     /**
      * @param {import("../entities/core/ValetudoTimer")} timerDefinition
      */
-    executeTimer(timerDefinition) {
+    async executeTimer(timerDefinition) {
         let action;
 
         switch (timerDefinition.action?.type) {
             case ValetudoTimer.ACTION_TYPE.FULL_CLEANUP:
                 action = new ValetudoFullCleanupTimerAction({robot: this.robot});
-                break;
-            case ValetudoTimer.ACTION_TYPE.ZONE_CLEANUP:
-                action = new ValetudoZoneCleanupTimerAction({
-                    robot: this.robot,
-                    zoneId: timerDefinition.action?.params?.zone_id
-                });
                 break;
             case ValetudoTimer.ACTION_TYPE.SEGMENT_CLEANUP:
                 action = new ValetudoSegmentCleanupTimerAction({
@@ -85,26 +112,70 @@ class Scheduler {
                     customOrder: timerDefinition.action?.params?.custom_order
                 });
                 break;
-            case ValetudoTimer.ACTION_TYPE.GOTO_LOCATION:
-                action = new ValetudoGoToTimerAction({
-                    robot: this.robot,
-                    goToId: timerDefinition.action?.params?.goto_id
-                });
-                break;
         }
 
-        if (action) {
-            try {
-                action.run().then(() => {/*Intentional*/});
-            } catch (e) {
-                Logger.error("Error while executing timer " + timerDefinition.id, e);
-            }
-        } else {
+        if (action === undefined) {
             Logger.warn(
                 "Error while executing timer " + timerDefinition.id,
                 "Couldn't find timer action for type: " + timerDefinition.action.type
             );
+
+            return;
         }
+
+
+        const preActions = [];
+        if (Array.isArray(timerDefinition.pre_actions)) {
+            for (const timerPreActionDefinition of timerDefinition.pre_actions) {
+                let preAction;
+
+                switch (timerPreActionDefinition.type) {
+                    case ValetudoTimer.PRE_ACTION_TYPE.FAN_SPEED_CONTROL:
+                        preAction = new ValetudoFanSpeedControlTimerPreAction({
+                            robot: this.robot,
+                            value: timerPreActionDefinition.params.value
+                        });
+                        break;
+                    case ValetudoTimer.PRE_ACTION_TYPE.WATER_USAGE_CONTROL:
+                        preAction = new ValetudoWaterUsageControlTimerPreAction({
+                            robot: this.robot,
+                            value: timerPreActionDefinition.params.value
+                        });
+                        break;
+                    case ValetudoTimer.PRE_ACTION_TYPE.OPERATION_MODE_CONTROL:
+                        preAction = new ValetudoOperationModeControlTimerPreAction({
+                            robot: this.robot,
+                            value: timerPreActionDefinition.params.value
+                        });
+                        break;
+                }
+
+                if (preAction !== undefined) {
+                    preActions.push(preAction);
+                } else {
+                    Logger.warn(
+                        "Error while executing timer " + timerDefinition.id,
+                        "Couldn't find timer pre_action for type: " + timerPreActionDefinition.type
+                    );
+
+                    return;
+                }
+            }
+        }
+
+        // We have one loop to build the preActions array and this second one to execute them,
+        // so that we don't partly execute a broken timer if some pre_action configs are invalid
+        for (const preAction of preActions) {
+            await preAction.run();
+        }
+
+        if (preActions.length > 0) {
+            // Give the firmware some time to report back state changes to Valetudo before continuing
+            await sleep(5_000);
+        }
+
+
+        await action.run();
     }
 
     /**

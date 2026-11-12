@@ -1,26 +1,30 @@
 const express = require("express");
 const os = require("os");
-const Tools = require("../Tools");
+const Tools = require("../utils/Tools");
 
 class SystemRouter {
     /**
      *
      * @param {object} options
+     * @param {import("../PhoenixManager")} options.phoenixManager
      */
     constructor(options) {
         this.router = express.Router({mergeParams: true});
+        this.phoenixManager = options.phoenixManager;
 
         this.initRoutes();
     }
 
 
     initRoutes() {
-        this.router.get("/host/info", (req, res) => {
+        this.router.get("/host/info", async (req, res) => {
+            const systemStats = await Tools.GET_SYSTEM_STATS();
+
             res.json({
                 hostname: os.hostname(),
                 arch: os.arch(),
                 uptime: Math.floor(os.uptime()),
-                ...Tools.GET_SYSTEM_STATS(),
+                ...systemStats,
             });
         });
 
@@ -34,7 +38,11 @@ class SystemRouter {
                 gid: typeof process.getegid === "function" ? process.getegid() : -1,
                 pid: process.pid,
                 versions: process.versions,
-                env: process.env
+                env: process.env,
+                phoenix: {
+                    canReincarnate: this.phoenixManager.canReincarnate(),
+                    generation: this.phoenixManager.cycleData.generation
+                }
             });
         });
     }

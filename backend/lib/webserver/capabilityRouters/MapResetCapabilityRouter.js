@@ -1,29 +1,17 @@
-const Logger = require("../../Logger");
-
 const CapabilityRouter = require("./CapabilityRouter");
 
 class MapResetCapabilityRouter extends CapabilityRouter {
-
     initRoutes() {
-        this.router.put("/", async (req, res) => {
-            if (req.body && req.body.action) {
+        this.router.put("/", this.validator, async (req, res) => {
+            if (req.body.action === "reset") {
                 try {
-                    switch (req.body.action) {
-                        case "reset":
-                            await this.capability.reset();
-                            break;
-                        default:
-                            // noinspection ExceptionCaughtLocallyJS
-                            throw new Error("Invalid action");
-                    }
-
+                    await this.capability.reset();
                     res.sendStatus(200);
                 } catch (e) {
-                    Logger.warn("Error while executing action \"" + req.body.action + "\" for MapResetCapability", e);
-                    res.status(500).json(e.message);
+                    this.sendErrorResponse(req, res, e);
                 }
             } else {
-                res.status(400).send("Missing action in request body");
+                res.sendStatus(400);
             }
         });
     }

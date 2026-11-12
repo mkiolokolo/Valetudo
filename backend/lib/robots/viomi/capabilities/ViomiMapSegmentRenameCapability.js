@@ -9,21 +9,20 @@ class ViomiMapSegmentRenameCapability extends MapSegmentRenameCapability {
      * @param {string} name
      */
     async renameSegment(segment, name) {
-        if (this.robot.state.map?.metaData?.defaultMap === true) {
+        if (this.robot.state.map.metaData.defaultMap === true) {
             throw new Error("Can't rename segment because the map was not parsed yet");
         }
 
         await this.robot.sendCommand("rename_room", [
-            this.robot.state.map.metaData.vendorMapId,
+            this.robot.ephemeralState.vendorMapId,
             1,
-            segment.id,
+            parseInt(segment.id),
             name
         ],
-        {
-            timeout: 5000
-        }).finally(() => {
-            this.robot.pollMap();
-        });
+        {timeout: 5000}
+        );
+
+        this.robot.pollMap();
     }
 }
 

@@ -4,12 +4,12 @@ const WaterUsageControlCapability = require("../../../core/capabilities/WaterUsa
 const stateAttrs = entities.state.attributes;
 
 /**
- * @extends WaterUsageControlCapability<import("../MockRobot")>
+ * @extends WaterUsageControlCapability<import("../MockValetudoRobot")>
  */
 class MockWaterUsageControlCapability extends WaterUsageControlCapability {
     /**
      * @param {object} options
-     * @param {import("../MockRobot")} options.robot
+     * @param {import("../MockValetudoRobot")} options.robot
      */
     constructor(options) {
         let presets = [
@@ -18,8 +18,7 @@ class MockWaterUsageControlCapability extends WaterUsageControlCapability {
             new ValetudoSelectionPreset({name: entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.LOW, value: 2}),
             new ValetudoSelectionPreset({name: entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.MEDIUM, value: 3}),
             new ValetudoSelectionPreset({name: entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.HIGH, value: 4}),
-            new ValetudoSelectionPreset({name: entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.TURBO, value: 5}),
-            new ValetudoSelectionPreset({name: entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.MAX, value: 6})
+            new ValetudoSelectionPreset({name: entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.MAX, value: 5})
         ];
         super({
             robot: options.robot,
@@ -39,7 +38,9 @@ class MockWaterUsageControlCapability extends WaterUsageControlCapability {
      * @returns {Promise<void>}
      */
     async selectPreset(preset) {
-        const matchedPreset = this.presets.find(p => p.name === preset);
+        const matchedPreset = this.presets.find(p => {
+            return p.name === preset;
+        });
 
         if (matchedPreset) {
             this.StateAttr.value = matchedPreset.name;

@@ -1,4 +1,4 @@
 module.exports = {
-    LinuxAlsaSpeakerVolumeControlCapability: require("./LinuxAlsaSpeakerVolumeControlCapability"),
+    LinuxDuststreamingCapability: require("./LinuxDuststreamingCapability"),
     LinuxWifiConfigurationCapability: require("./LinuxWifiConfigurationCapability"),
 };

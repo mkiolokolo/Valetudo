@@ -1,9 +1,9 @@
 const ntp = require("@destinationstransfers/ntp");
 
-const execSync = require("child_process").execSync;
-
+const LinuxTools = require("./utils/LinuxTools");
 const Logger = require("./Logger");
 const States = require("./entities/core/ntpClient");
+const Tools = require("./utils/Tools");
 
 
 class NTPClient {
@@ -15,6 +15,7 @@ class NTPClient {
         this.config = options.config;
 
         this.nextPollTimeout = undefined;
+        this.retryWaitTime = BASE_RETRY_WAIT_TIME;
 
         this.config.onUpdate((key) => {
             if (key === "ntpClient") {
@@ -22,18 +23,31 @@ class NTPClient {
             }
         });
 
-        this.reconfigure();
+        if (this.config.get("ntpClient").enabled) {
+            this.state = new States.ValetudoNTPClientEnabledState({});
+        } else {
+            this.state = new States.ValetudoNTPClientDisabledState({});
+        }
+
+        // On startup, we need to wait for a while for Valetudo to fully start up (at least when using pkg) or else
+        // we will get ntp sync timeouts in the log due to something blocking the process for a while
+        setTimeout(() => {
+            this.reconfigure();
+        }, 10000);
     }
 
     reconfigure() {
         clearTimeout(this.nextPollTimeout);
+        this.retryWaitTime = BASE_RETRY_WAIT_TIME;
         const ntpConfig = this.config.get("ntpClient");
 
         if (ntpConfig.enabled === true) {
             this.state = new States.ValetudoNTPClientEnabledState({});
 
             if (this.config.get("embedded") === true) {
-                this.pollTime().then(() => {});
+                this.pollTime().catch(() => {
+                    /* intentional */
+                });
             }
         } else {
             this.state = new States.ValetudoNTPClientDisabledState({});
@@ -67,11 +81,14 @@ class NTPClient {
             this.state = new States.ValetudoNTPClientSyncedState({
                 offset: currentNTPTime.getTime() - preSyncTime.getTime()
             });
+            this.retryWaitTime = BASE_RETRY_WAIT_TIME;
 
-            Logger.debug("Next NTP sync in " + ntpConfig.interval + " ms");
+            Logger.debug(`Next NTP sync in ${ntpConfig.interval}ms`);
 
             this.nextPollTimeout = setTimeout(() => {
-                this.pollTime();
+                this.pollTime().catch(() => {
+                    /* intentional */
+                });
             }, ntpConfig.interval);
         } catch (e) {
             let error = {
@@ -103,40 +120,28 @@ class NTPClient {
             }
 
             if (error.type !== States.ValetudoNTPClientErrorState.ERROR_TYPE.TRANSIENT) {
-                Logger.warn("Error during time sync:", e);
+                Logger.warn(`${Tools.CAPITALIZE(error.type)} error during time sync: ${error.message}`);
             } else {
-                Logger.debug("Error during time sync:", e);
+                Logger.debug(`${Tools.CAPITALIZE(error.type)} error during time sync: ${error.message}`);
             }
 
             this.state = new States.ValetudoNTPClientErrorState(error);
 
-            Logger.debug("Next NTP sync in " + FAILURE_RETRY_INTERVAL + " ms");
-
+            Logger.debug(`Next NTP sync attempt in ${this.retryWaitTime}ms`);
             this.nextPollTimeout = setTimeout(() => {
-                this.pollTime();
-            }, FAILURE_RETRY_INTERVAL);
+                this.pollTime().catch(() => {
+                    /* intentional */
+                });
+            }, this.retryWaitTime);
+
+            this.retryWaitTime = Math.min(this.retryWaitTime * 2, 8 * 60 * 60 * 1000);
         }
     }
 
 
     setTime(date) {
         if (this.config.get("embedded") === true) {
-            let dateString = "";
-
-            dateString += date.getFullYear().toString();
-            dateString += "-";
-            dateString += (date.getMonth() + 1).toString().padStart(2, 0);
-            dateString += "-";
-            dateString += date.getDate().toString().padStart(2, 0);
-            dateString += " ";
-            dateString += date.getHours().toString().padStart(2,0);
-            dateString += ":";
-            dateString += date.getMinutes().toString().padStart(2,0);
-            dateString += ":";
-            dateString += date.getSeconds().toString().padStart(2,0);
-
-
-            execSync("date -s \""+dateString+"\"");
+            LinuxTools.SET_TIME(date);
 
             Logger.info("Successfully set the robot time via NTP to", date);
         } else {
@@ -161,6 +166,6 @@ class NTPClient {
     }
 }
 
-const FAILURE_RETRY_INTERVAL = 60*1000; //1 Minute
+const BASE_RETRY_WAIT_TIME = 60*1000; //1 Minute
 
 module.exports = NTPClient;

@@ -1,44 +1,65 @@
 const PersistentMapControlCapability = require("../../../core/capabilities/PersistentMapControlCapability");
-
-const entities = require("../../../entities");
-
-const stateAttrs = entities.state.attributes;
+const {sleep} = require("../../../utils/misc");
 
 /**
  * @extends PersistentMapControlCapability<import("../ViomiValetudoRobot")>
  */
 class ViomiPersistentMapControlCapability extends PersistentMapControlCapability {
     /**
+     * @param {object} options
+     * @param {import("../ViomiValetudoRobot")} options.robot
+     */
+    constructor(options) {
+        super(options);
+
+        this.persistentMapState = undefined;
+    }
+
+    /**
      * @returns {Promise<boolean>}
      */
     async isEnabled() {
-        const PersistentMapSettingStateAttribute = this.robot.state.getFirstMatchingAttributeByConstructor(stateAttrs.PersistentMapSettingStateAttribute);
+        await this.robot.pollState(); //fetching robot state populates the capability's internal state. somewhat spaghetti :(
 
-        return !!(PersistentMapSettingStateAttribute && PersistentMapSettingStateAttribute.value === true);
+        return this.persistentMapState;
     }
+
+    /**
+     * Wait for this.isEnabled()==targetState up to timeout seconds, returns true if target state was reached
+     *
+     * @param {boolean} targetState
+     * @param {number} timeout in seconds
+     * @returns {Promise<boolean>}
+     */
+    async waitForState(targetState,timeout) {
+        let startTime=Date.now();
+        do {
+            let currentState=await this.isEnabled();
+            if (currentState===targetState) {
+                return true;
+            }
+            await sleep(100);
+        } while (Math.abs(startTime-Date.now())<(timeout*1000));
+        return false;
+    }
+
 
     /**
      * @returns {Promise<void>}
      */
     async enable() {
-        // TODO: test
         await this.robot.sendCommand("set_remember", [1], {});
+        // wait for persistentMapState to change (up to 10 seconds)
+        await this.waitForState(true,10);
     }
 
     /**
      * @returns {Promise<void>}
      */
     async disable() {
-        // TODO: test
         await this.robot.sendCommand("set_remember", [0], {});
-    }
-
-    /**
-     * @returns {Promise<void>}
-     */
-    async reset() {
-        // TODO: test
-        await this.robot.sendCommand("set_resetmap", [], {});
+        // wait for persistentMapState to change (up to 10 seconds)
+        await this.waitForState(false,10);
     }
 }
 

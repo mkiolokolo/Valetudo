@@ -13,7 +13,56 @@
               "schema": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/components/schemas/ConsumableStateAttribute"
+                  "$ref": "#/components/schemas/ValetudoConsumable"
+                }
+              },
+              "examples": {
+                "getConsumablesStatus": {
+                  "description": "Get the status of the consumables.",
+                  "value": 
+                    [
+                      {
+                        "__class": "ValetudoConsumable",
+                        "metaData": {},
+                        "type": "brush",
+                        "subType": "main",
+                        "remaining": {
+                          "value": 123456,
+                          "unit": "minutes"
+                        }
+                      },
+                      {
+                        "__class": "ValetudoConsumable",
+                        "metaData": {},
+                        "type": "brush",
+                        "subType": "side_right",
+                        "remaining": {
+                          "value": 1234,
+                          "unit": "minutes"
+                        }
+                      },
+                      {
+                        "__class": "ValetudoConsumable",
+                        "metaData": {},
+                        "type": "filter",
+                        "subType": "main",
+                        "remaining": {
+                          "value": 5432,
+                          "unit": "minutes"
+                        }
+                      },
+                      {
+                        "__class": "ValetudoConsumable",
+                        "metaData": {},
+                        "type": "cleaning",
+                        "subType": "sensor",
+                        "remaining": {
+                          "value": 123,
+                          "unit": "minutes"
+                        }
+                      }
+                    ]
+                  
                 }
               }
             }
@@ -131,7 +180,29 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "availableConsumables": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string"
+                        },
+                        "subType": {
+                          "type": "string"
+                        },
+                        "unit": {
+                          "type": "string"
+                        },
+                        "maxValue": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }

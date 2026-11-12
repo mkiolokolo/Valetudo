@@ -1,6 +1,6 @@
 import swaggerJsdoc from "swagger-jsdoc";
 import SwaggerParser from "swagger-parser";
-import Tools from "../backend/lib/Tools.js";
+import Tools from "../backend/lib/utils/Tools.js";
 import * as fs from "fs";
 import * as path from "path";
 const __dirname = path.resolve();
@@ -24,13 +24,17 @@ const options = {
             {name: "ValetudoEvents", description: "Valetudo Events"},
             {name: "Robot", description: "Robot API"},
             {name: "System", description: "System API"},
+            {name: "MQTT", description: "MQTT Controller API"},
+            {name: "NetworkAdvertisement", description: "Network Advertisement Manager API"},
             {name: "NTP", description: "NTP Client API"},
             {name: "Timers", description: "Timers API"},
+            {name: "Updater", description: "Update Valetudo using Valetudo"},
 
             {name: "BasicControlCapability", description: "Basic control capability"},
             {name: "FanSpeedControlCapability", description: "Fan speed control capability"},
             {name: "WaterUsageControlCapability", description: "Water usage control capability"},
             {name: "WifiConfigurationCapability", description: "Wi-Fi configuration capability"},
+            {name: "WifiScanCapability", description: "Wi-Fi scan capability"},
             {name: "ZoneCleaningCapability", description: "Zone cleaning capability"},
             {name: "MapSegmentationCapability", description: "Map segment cleaning capability"},
             {name: "ManualControlCapability", description: "Manual control capability"},
@@ -44,13 +48,23 @@ const options = {
             {name: "MapSegmentRenameCapability", description: "Map segment rename capability"},
             {name: "MapSnapshotCapability", description: "Map snapshots capability"},
             {name: "PersistentMapControlCapability", description: "Persistent map control capability"},
-            {name: "SensorCalibrationCapability", description: "Sensor calibration capability"},
             {name: "SpeakerTestCapability", description: "Speaker test capability"},
             {name: "SpeakerVolumeControlCapability", description: "Speaker volume control capability"},
             {name: "VoicePackManagementCapability", description: "Voice pack management capability"},
             {name: "CombinedVirtualRestrictionsCapability", description: "Combined virtual restrictions capability"},
             {name: "PendingMapChangeHandlingCapability", description: "Pending map change handling capability"},
-            {name: "MappingPassCapability", description: "Mapping pass capability"}
+            {name: "MappingPassCapability", description: "Mapping pass capability"},
+            {name: "KeyLockCapability", description: "Key lock capability"},
+            {name: "AutoEmptyDockManualTriggerCapability", description: "Auto empty dock manual trigger capability"},
+            {name: "MopDockCleanManualTriggerCapability", description: "Mop Dock clean manual trigger capability"},
+            {name: "MopDockDryManualTriggerCapability", description: "Mop Dock dry manual trigger capability"},
+            {name: "OperationModeControlCapability", description: "Operation mode control capability"},
+            {name: "ObstacleAvoidanceControlCapability", description: "Obstacle avoidance control capability"},
+            {name: "PetObstacleAvoidanceControlCapability", description: "Pet obstacle avoidance control capability"},
+            {name: "CarpetSensorModeControlCapability", description: "Carpet sensor mode control capability"},
+            {name: "CollisionAvoidantNavigationControlCapability", description: "Collision avoidant navigation control capability"},
+            {name: "TotalStatisticsCapability", description: "Total statistics capability"},
+            {name: "CurrentStatisticsCapability", description: "Current statistics capability"},
         ],
         components: {
             responses: {
@@ -84,6 +98,7 @@ const options = {
         path.join(__dirname, "./backend/lib/entities/map/doc/*.openapi.json"),
         path.join(__dirname, "./backend/lib/entities/core/doc/*.openapi.json"),
         path.join(__dirname, "./backend/lib/entities/core/ntpClient/doc/*.openapi.json"),
+        path.join(__dirname, "./backend/lib/entities/core/updater/doc/*.openapi.json"),
         path.join(__dirname, "./backend/lib/entities/state/doc/*.openapi.json"),
         path.join(__dirname, "./backend/lib/entities/state/attributes/doc/*.openapi.json"),
         path.join(__dirname, "./backend/lib/core/capabilities/doc/*.openapi.json")
@@ -94,10 +109,15 @@ const spec = await swaggerJsdoc(options);
 
 await SwaggerParser.validate(spec);
 
-
+// For internal use by valetudo + inbuilt swagger UI
 fs.writeFileSync(
     path.join(__dirname, "./backend/lib/res/valetudo.openapi.schema.json"),
     JSON.stringify(spec)
 );
 
-
+// For external use as a reference resource
+fs.mkdirSync(path.join(__dirname, "./build/"), { recursive: true })
+fs.writeFileSync(
+    path.join(__dirname, "./build/valetudo.openapi.schema.json"),
+    JSON.stringify(spec, null, 2)
+)

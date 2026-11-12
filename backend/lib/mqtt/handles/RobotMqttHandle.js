@@ -1,10 +1,12 @@
 const CallbackAttributeSubscriber = require("../../entities/CallbackAttributeSubscriber");
 const MqttHandle = require("./MqttHandle");
 
+const CAPABILITY_TYPE_TO_HANDLE_MAPPING = require("./HandleMappings").CAPABILITY_TYPE_TO_HANDLE_MAPPING;
+const Logger = require("../../Logger");
 const MapNodeMqttHandle = require("./MapNodeMqttHandle");
+const STATUS_ATTR_TO_HANDLE_MAPPING = require("./HandleMappings").STATUS_ATTR_TO_HANDLE_MAPPING;
 const VacuumHassComponent = require("../homeassistant/components/VacuumHassComponent");
-const {CAPABILITY_TYPE_TO_HANDLE_MAPPING} = require("./HandleMappings");
-const {STATUS_ATTR_TO_HANDLE_MAPPING} = require("./HandleMappings");
+const ValetudoEventsNodeMqttHandle = require("./ValetudoEventsNodeMqttHandle");
 
 /**
  * This class represents the robot as a Homie device
@@ -14,13 +16,16 @@ class RobotMqttHandle extends MqttHandle {
      * @param {object} options
      * @param {import("../../core/ValetudoRobot")} options.robot
      * @param {import("../MqttController")} options.controller
+     * @param {import("../../ValetudoEventStore")} options.valetudoEventStore
      * @param {string} options.baseTopic Base topic for Valetudo
      * @param {string} options.topicName Topic identifier for this robot
      * @param {string} options.friendlyName Friendly name for this robot
+     * @param {Array<string>} options.optionalExposedCapabilities
      */
     constructor(options) {
         super(options);
         this.robot = options.robot;
+        this.valetudoEventStore = options.valetudoEventStore;
         this.baseTopic = options.baseTopic;
         this.mapHandle = null;
 
@@ -32,10 +37,20 @@ class RobotMqttHandle extends MqttHandle {
         });
         this.registerChild(this.mapHandle);
 
+        this.valetudoEventsHandle = new ValetudoEventsNodeMqttHandle({
+            parent: this,
+            controller: this.controller,
+            robot: this.robot,
+            valetudoEventStore: this.valetudoEventStore
+        });
+        this.registerChild(this.valetudoEventsHandle);
+
         // Attach all available capabilities to self
         for (const [type, capability] of Object.entries(this.robot.capabilities)) {
-            if (CAPABILITY_TYPE_TO_HANDLE_MAPPING[type] !== undefined) {
-                this.registerChild(new CAPABILITY_TYPE_TO_HANDLE_MAPPING[type]({
+            const handle = CAPABILITY_TYPE_TO_HANDLE_MAPPING[type];
+
+            if (handle !== undefined && (handle.OPTIONAL !== true || options.optionalExposedCapabilities.includes(type))) {
+                this.registerChild(new handle({
                     parent: this,
                     capability: capability,
                     controller: this.controller,
@@ -44,9 +59,11 @@ class RobotMqttHandle extends MqttHandle {
             }
         }
 
-        // Subscribe to all available status attributes. Once we receive an event we will attach the respective handle.
+        // Subscribe to all available status attributes. Once we receive an event, we will attach the respective handle.
         this.statusSubscriber = new CallbackAttributeSubscriber((eventType, attribute) => {
-            this.onStatusAttributeEvent(eventType, attribute).then();
+            this.onStatusAttributeEvent(eventType, attribute).catch(err => {
+                Logger.error("Error in onStatusAttributeEvent", err);
+            });
         });
 
         for (const item of STATUS_ATTR_TO_HANDLE_MAPPING) {
@@ -77,17 +94,25 @@ class RobotMqttHandle extends MqttHandle {
             if (item.matcher.attributeClass !== attribute.__class) {
                 return false;
             }
+
             if (item.matcher.attributeType !== undefined && item.matcher.attributeType !== attribute.type) {
                 return false;
             }
+
             // noinspection RedundantIfStatementJS // screw the linter, readability first
             if (item.matcher.attributeSubType !== undefined && item.matcher.attributeSubType !== attribute.subType) {
                 return false;
             }
+
             return true;
         });
-        const matchingMatchers = matchingMappings.map(item => item.matcher);
-        const matchingHandles = matchingMappings.map(item => item.handle);
+
+        const matchingMatchers = matchingMappings.map(item => {
+            return item.matcher;
+        });
+        const matchingHandles = matchingMappings.map(item => {
+            return item.handle;
+        });
 
         // Unsubscribe self from status since we're not interested in this attribute any more once the handle is registered
         for (const matcher of matchingMatchers) {
@@ -102,12 +127,16 @@ class RobotMqttHandle extends MqttHandle {
                     robot: this.robot,
                 }));
             }
-            await this.deconfigure({
-                cleanHomie: false,
-                cleanValues: false,
-                unsubscribe: false
-            });
-            await this.configure();
+
+            if (this.controller.isConnected) {
+                await this.deconfigure({
+                    unsubscribe: false
+                });
+
+                await this.configure();
+            } else {
+                Logger.debug("Skipping (de)configure on robot status attribute discovery, as we're not connected to MQTT.");
+            }
         });
     }
 
@@ -120,10 +149,22 @@ class RobotMqttHandle extends MqttHandle {
         return {
             "$homie": "4.0.0",
             "$name": this.friendlyName,
-            "$nodes": this.children.map(p => p.topicName).join(","),
+            "$nodes": this.children.map(p => {
+                return p.topicName;
+            }).join(","),
             "$extensions": "",
             "$implementation": "Valetudo"
         };
+    }
+
+    async refresh() {
+        try {
+            await this.robot.pollState();
+        } catch (e) {
+            Logger.error("RobotMQTTHandle: Error while polling the robots state", e);
+        }
+
+        await super.refresh();
     }
 
     /**
@@ -135,6 +176,16 @@ class RobotMqttHandle extends MqttHandle {
      */
     getMapHandle() {
         return this.mapHandle;
+    }
+
+    /**
+     * Same as getMapHandle()
+     *
+     * @public
+     * @return {null|ValetudoEventsNodeMqttHandle}
+     */
+    getValetudoEventsHandle() {
+        return this.valetudoEventsHandle;
     }
 }
 

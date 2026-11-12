@@ -1,7 +1,10 @@
 const capabilities = require("./capabilities");
 const entities = require("../../entities");
 const MiioValetudoRobot = require("../MiioValetudoRobot");
+const QuirksCapability = require("../../core/capabilities/QuirksCapability");
+const RoborockConst = require("./RoborockConst");
 const RoborockGen4ValetudoRobot = require("./RoborockGen4ValetudoRobot");
+const RoborockQuirkFactory = require("./RoborockQuirkFactory");
 const RoborockValetudoRobot = require("./RoborockValetudoRobot");
 const ValetudoRestrictedZone = require("../../entities/core/ValetudoRestrictedZone");
 
@@ -13,7 +16,17 @@ class RoborockS7ValetudoRobot extends RoborockGen4ValetudoRobot {
      * @param {import("../../ValetudoEventStore")} options.valetudoEventStore
      */
     constructor(options) {
-        super(Object.assign({}, options, {waterGrades: WATER_GRADES}));
+        super(
+            Object.assign(
+                {},
+                options,
+                {
+                    waterGrades: WATER_GRADES,
+                    dockType: RoborockConst.DOCK_TYPE.AUTO_EMPTY
+                }
+            )
+        );
+
 
         this.registerCapability(new capabilities.RoborockCombinedVirtualRestrictionsCapability({
             robot: this,
@@ -25,22 +38,54 @@ class RoborockS7ValetudoRobot extends RoborockGen4ValetudoRobot {
 
         this.registerCapability(new capabilities.RoborockWaterUsageControlCapability({
             robot: this,
-            presets: Object.keys(this.waterGrades).map(k => new entities.core.ValetudoSelectionPreset({name: k, value: this.waterGrades[k]}))
+            presets: Object.keys(this.waterGrades).map(k => {
+                return new entities.core.ValetudoSelectionPreset({name: k, value: this.waterGrades[k]});
+            })
         }));
 
-        this.state.upsertFirstMatchingAttribute(new entities.state.attributes.AttachmentStateAttribute({
-            type: entities.state.attributes.AttachmentStateAttribute.TYPE.WATERTANK,
-            attached: false
+        this.registerCapability(new capabilities.RoborockCarpetSensorModeControlCapability({
+            robot: this,
+            liftModeId: 1
         }));
 
-        this.state.upsertFirstMatchingAttribute(new entities.state.attributes.AttachmentStateAttribute({
-            type: entities.state.attributes.AttachmentStateAttribute.TYPE.MOP,
-            attached: false
+        [
+            capabilities.RoborockAutoEmptyDockAutoEmptyIntervalControlCapability,
+            capabilities.RoborockAutoEmptyDockManualTriggerCapability,
+            capabilities.RoborockKeyLockCapability,
+            capabilities.RoborockMappingPassCapability,
+            capabilities.RoborockCleanRouteControlCapability,
+            capabilities.RoborockAutoEmptyDockAutoEmptyDurationControlCapability,
+        ].forEach(capability => {
+            this.registerCapability(new capability({robot: this}));
+        });
+
+        const quirkFactory = new RoborockQuirkFactory({
+            robot: this
+        });
+        this.registerCapability(new QuirksCapability({
+            robot: this,
+            quirks: [
+                quirkFactory.getQuirk(RoborockQuirkFactory.KNOWN_QUIRKS.BUTTON_LEDS),
+                quirkFactory.getQuirk(RoborockQuirkFactory.KNOWN_QUIRKS.STATUS_LED),
+            ]
         }));
     }
 
     getModelName() {
         return "S7";
+    }
+
+    getModelDetails() {
+        return Object.assign(
+            {},
+            super.getModelDetails(),
+            {
+                supportedAttachments: [
+                    entities.state.attributes.AttachmentStateAttribute.TYPE.WATERTANK,
+                    entities.state.attributes.AttachmentStateAttribute.TYPE.MOP,
+                ]
+            }
+        );
     }
 
     static IMPLEMENTATION_AUTO_DETECTION_HANDLER() {
@@ -56,6 +101,5 @@ const WATER_GRADES = {
     [entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.MEDIUM]: 202,
     [entities.state.attributes.PresetSelectionStateAttribute.INTENSITY.HIGH]: 203
 };
-
 
 module.exports = RoborockS7ValetudoRobot;

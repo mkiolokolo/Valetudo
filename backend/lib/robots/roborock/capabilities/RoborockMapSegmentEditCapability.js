@@ -1,5 +1,5 @@
 const MapSegmentEditCapability = require("../../../core/capabilities/MapSegmentEditCapability");
-const RRMapParser = require("../RRMapParser");
+const RoborockMapParser = require("../RoborockMapParser");
 
 /**
  * @extends MapSegmentEditCapability<import("../RoborockValetudoRobot")>
@@ -11,9 +11,9 @@ class RoborockMapSegmentEditCapability extends MapSegmentEditCapability {
      * @returns {Promise<void>}
      */
     async joinSegments(segmentA, segmentB) {
-        await this.robot.sendCommand("merge_segment", [segmentA.id, segmentB.id], {timeout: 5000}).finally(() => {
-            this.robot.pollMap();
-        });
+        await this.robot.sendCommand("merge_segment", [parseInt(segmentA.id), parseInt(segmentB.id)], {timeout: 5000});
+
+        this.robot.pollMap();
     }
 
     /**
@@ -28,16 +28,16 @@ class RoborockMapSegmentEditCapability extends MapSegmentEditCapability {
      */
     async splitSegment(segment, pA, pB) {
         const flippedSplitLine = [
-            segment.id,
+            parseInt(segment.id),
             Math.floor(pA.x * 10),
-            Math.floor(RRMapParser.DIMENSION_MM - pA.y * 10),
+            Math.floor(RoborockMapParser.DIMENSION_MM - pA.y * 10),
             Math.floor(pB.x * 10),
-            Math.floor(RRMapParser.DIMENSION_MM - pB.y * 10)
+            Math.floor(RoborockMapParser.DIMENSION_MM - pB.y * 10)
         ];
 
-        await this.robot.sendCommand("split_segment", flippedSplitLine, {timeout: 5000}).finally(() => {
-            this.robot.pollMap();
-        });
+        await this.robot.sendCommand("split_segment", flippedSplitLine, {timeout: 5000});
+
+        this.robot.pollMap();
     }
 }
 

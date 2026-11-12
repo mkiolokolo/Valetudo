@@ -14,9 +14,12 @@ const MIOT_SERVICES = Object.freeze({
             DEVICE_FAULT: {
                 PIID: 2
             },
-            MODE: {
-                // the spec reports this as 4, but empirically shows up as piid 3
+            // empirically fan speeds show up as piid 3 on the S4 Max even though it's piid 4 on newer robots and also in the miot spec
+            LEGACY_FAN_SPEED: {
                 PIID: 3
+            },
+            FAN_SPEED: {
+                PIID: 4
             }
         },
         ACTIONS: {
@@ -94,25 +97,21 @@ class RoborockGen4ValetudoRobot extends RoborockValetudoRobot {
     constructor(options) {
         super(Object.assign({}, options, {fanSpeeds: FAN_SPEEDS}));
 
-        this.registerCapability(new capabilities.RoborockMultiMapPersistentMapControlCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMultiMapMapResetCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMapSegmentationCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMapSegmentEditCapability({
-            robot: this
-        }));
-        this.registerCapability(new capabilities.RoborockMapSegmentRenameCapability({
-            robot: this
-        }));
+        [
+            capabilities.RoborockCarpetModeControlCapability,
+            capabilities.RoborockMultiMapPersistentMapControlCapability,
+            capabilities.RoborockMultiMapMapResetCapability,
+            capabilities.RoborockMapSegmentationCapability,
+            capabilities.RoborockMapSegmentEditCapability,
+            capabilities.RoborockMapSegmentRenameCapability,
+            capabilities.RoborockHighResolutionManualControlCapability
+        ].forEach(capability => {
+            this.registerCapability(new capability({robot: this}));
+        });
     }
 
-    onMessage(msg) {
-        if (super.onMessage(msg) === true) {
+    onIncomingCloudMessage(msg) {
+        if (super.onIncomingCloudMessage(msg) === true) {
             return true;
         }
 
@@ -135,7 +134,9 @@ class RoborockGen4ValetudoRobot extends RoborockValetudoRobot {
                 return false;
         }
 
-        this.sendCloud({id: msg.id, "result":"ok"});
+        this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+            Logger.warn("Error while sending cloud ack", err);
+        });
         return true;
     }
 
@@ -144,10 +145,7 @@ class RoborockGen4ValetudoRobot extends RoborockValetudoRobot {
             case MIOT_SERVICES.VACUUM_1.SIID:
                 switch (msg.piid) {
                     case MIOT_SERVICES.VACUUM_1.PROPERTIES.STATUS.PIID:
-                        // if we are paused, we may lose if it is zoned or
-                        // segment resume, maybe we should skip this?
                         this.parseAndUpdateState({
-                            in_cleaning: 1,
                             state: msg.value,
                         });
                         return;
@@ -159,7 +157,8 @@ class RoborockGen4ValetudoRobot extends RoborockValetudoRobot {
                             });
                         }
                         return;
-                    case MIOT_SERVICES.VACUUM_1.PROPERTIES.MODE.PIID:
+                    case MIOT_SERVICES.VACUUM_1.PROPERTIES.LEGACY_FAN_SPEED.PIID:
+                    case MIOT_SERVICES.VACUUM_1.PROPERTIES.FAN_SPEED.PIID:
                         this.parseAndUpdateState({
                             fan_power: msg.value
                         });
@@ -170,13 +169,15 @@ class RoborockGen4ValetudoRobot extends RoborockValetudoRobot {
                 switch (msg.piid) {
                     // error event
                     case MIOT_SERVICES.VACUUM_2.PROPERTIES.ERROR_CODE.PIID:
-                        this.parseAndUpdateState({
-                            state: 12, // error value
-                            error_code: msg.value
-                        });
+                        if (msg.value !== 0) {
+                            this.parseAndUpdateState({
+                                state: 12, // error value
+                                error_code: msg.value
+                            });
+                        }
                         return;
                     case MIOT_SERVICES.VACUUM_2.PROPERTIES.CONSUMABLE_ID.PIID: // consumable reminder event
-                    case MIOT_SERVICES.VACUUM_2.PROPERTIES.FAILED_REASON.PIID: // schedule cancled event
+                    case MIOT_SERVICES.VACUUM_2.PROPERTIES.FAILED_REASON.PIID: // schedule canceled event
                         return;
                 }
                 break;
@@ -195,7 +196,7 @@ class RoborockGen4ValetudoRobot extends RoborockValetudoRobot {
                 // the consumables only reports percent through this property, ignore
                 return;
         }
-        Logger.info("Unknown property change message received:", JSON.stringify(msg));
+        Logger.info("Unknown property change message received:", msg);
     }
 }
 

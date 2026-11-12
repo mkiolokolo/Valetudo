@@ -1,4 +1,5 @@
 const CallbackAttributeSubscriber = require("../../entities/CallbackAttributeSubscriber");
+const Logger = require("../../Logger");
 const NodeMqttHandle = require("./NodeMqttHandle");
 
 /**
@@ -21,13 +22,15 @@ class RobotStateNodeMqttHandle extends NodeMqttHandle {
         super(options);
 
         this.robot = options.robot;
-        this.statusSubscriber = new CallbackAttributeSubscriber(() => {
-            this.refresh().then();
+
+        this.statusSubscriber = new CallbackAttributeSubscriber((eventType, attribute, previousAttribute) => {
+            this.onStatusSubscriberEvent(eventType, attribute, previousAttribute);
         });
     }
 
     async configure() {
         await super.configure();
+
         for (const matcher of this.getInterestingStatusAttributes()) {
             this.robot.state.subscribe(this.statusSubscriber, matcher);
         }
@@ -35,7 +38,20 @@ class RobotStateNodeMqttHandle extends NodeMqttHandle {
 
     async deconfigure(options) {
         this.robot.state.unsubscribeAll(this.statusSubscriber);
+
         await super.deconfigure(options);
+    }
+
+    /**
+     *
+     * @param {string} eventType
+     * @param {import("../../entities/Attribute")} attribute
+     * @param {import("../../entities/Attribute")} [previousAttribute]
+     */
+    onStatusSubscriberEvent(eventType, attribute, previousAttribute) {
+        this.refresh().then(() => { /* intentional */ }).catch(err => {
+            Logger.error("Error during MqttHandle refresh", err);
+        });
     }
 
     /**

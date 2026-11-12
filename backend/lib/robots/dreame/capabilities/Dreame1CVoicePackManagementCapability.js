@@ -29,23 +29,9 @@ class Dreame1CVoicePackManagementCapability extends VoicePackManagementCapabilit
      * @returns {Promise<string>}
      */
     async getCurrentVoiceLanguage() {
-        const res = await this.robot.sendCommand("get_properties", [
-            {
-                did: this.robot.deviceId,
-                siid: this.siid,
-                piid: this.active_voicepack_piid
-            }
-        ]);
+        const res = await this.robot.miotHelper.readProperty(this.siid, this.active_voicepack_piid);
 
-        if (res?.length === 1) {
-            if (res[0].code === 0) {
-                return typeof res[0].value.toLowerCase === "function" ? res[0].value.toLowerCase() : res[0].value;
-            } else {
-                throw new Error("Error code " + res[0].code);
-            }
-        } else {
-            throw new Error("Received invalid response");
-        }
+        return typeof res.toLowerCase === "function" ? res.toLowerCase() : res;
     }
 
     /**
@@ -60,11 +46,10 @@ class Dreame1CVoicePackManagementCapability extends VoicePackManagementCapabilit
      * @returns {Promise<void>}
      */
     async downloadVoicePack(options) {
-        const res = await this.robot.sendCommand("action", {
-            did: this.robot.deviceId,
-            siid: this.siid,
-            aiid: this.aiid,
-            in: [
+        await this.robot.miotHelper.executeAction(
+            this.siid,
+            this.aiid,
+            [
                 {
                     piid: this.active_voicepack_piid,
                     value: typeof options.language === "string" ? options.language.toUpperCase() : "VA"
@@ -82,13 +67,7 @@ class Dreame1CVoicePackManagementCapability extends VoicePackManagementCapabilit
                     value: 1
                 }
             ]
-        });
-
-        if (res?.code === 0) {
-            return;
-        } else {
-            throw new Error("Error occurred");
-        }
+        );
     }
 
     /**

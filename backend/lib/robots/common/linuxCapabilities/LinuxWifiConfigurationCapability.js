@@ -1,7 +1,7 @@
 const NotImplementedError = require("../../../core/NotImplementedError");
-const os = require("os");
 const spawnSync = require("child_process").spawnSync;
-const ValetudoWifiConfiguration = require("../../../entities/core/ValetudoWifiConfiguration");
+const Tools = require("../../../utils/Tools");
+const ValetudoWifiStatus = require("../../../entities/core/ValetudoWifiStatus");
 const WifiConfigurationCapability = require("../../../core/capabilities/WifiConfigurationCapability");
 
 /**
@@ -10,29 +10,24 @@ const WifiConfigurationCapability = require("../../../core/capabilities/WifiConf
  */
 class LinuxWifiConfigurationCapability extends WifiConfigurationCapability {
     /**
-     * Implementations should provide or discover their own wireless interface which will be used in
-     * getWifiConfiguration().
+     * @param {object} options
+     * @param {T} options.robot
+     * @param {string} options.networkInterface
      *
-     * @abstract
-     * @returns {string}
      */
-    getWifiInterface() {
-        throw new NotImplementedError();
+    constructor(options) {
+        super(options);
+
+        this.networkInterface = options.networkInterface;
     }
 
     /**
-     * @returns {Promise<ValetudoWifiConfiguration>}
+     * @returns {Promise<ValetudoWifiStatus>}
      */
-    async getWifiConfiguration() {
+    async getWifiStatus() {
         if (this.robot.config.get("embedded") !== true) {
             throw new NotImplementedError("Linux Wi-Fi configuration capability only works on the robot itself");
         }
-
-        const output = {
-            details: {
-                state: ValetudoWifiConfiguration.STATE.UNKNOWN
-            }
-        };
 
         /*
             root@rockrobo:~# iw
@@ -41,24 +36,17 @@ class LinuxWifiConfigurationCapability extends WifiConfigurationCapability {
 
             :-)
          */
-        const iwOutput = spawnSync("iw", ["dev", this.getWifiInterface(), "link"]).stdout;
+        const iwOutput = spawnSync("iw", ["dev", this.networkInterface, "link"]);
+        const wifiStatus = this.parseIwStdout(iwOutput.stdout?.toString() || "");
 
-        if (iwOutput) {
-            const WIFI_CONNECTED_IW_REGEX = /^Connected to (?<bssid>[\da-f]{2}:[\da-f]{2}:[\da-f]{2}:[\da-f]{2}:[\da-f]{2}:[\da-f]{2})(?:.*\s*)SSID: (?<ssid>.*)\s*freq: (?<freq>\d*)\s*signal: (?<signal>-\d{1,3}) dBm\s*tx bitrate: (?<txbitrate>[\d.]*).*/;
-
-            const extractedWifiData = iwOutput.toString().match(WIFI_CONNECTED_IW_REGEX);
-            if (extractedWifiData) {
-                output.details.state = ValetudoWifiConfiguration.STATE.CONNECTED;
-                output.details.upspeed = parseFloat(extractedWifiData.groups.txbitrate);
-                output.details.signal = parseInt(extractedWifiData.groups.signal);
-                output.ssid = extractedWifiData.groups.ssid.trim();
-                output.details.ips = Object.values(os.networkInterfaces()).map(i => i.map(l => l.address)).flat().sort().filter(ip => ip !== "127.0.0.1" && ip !== "::1"); //lol this line
-                output.details.frequency = ValetudoWifiConfiguration.FREQUENCY_TYPE.W2_4Ghz;
-            }
-        } else {
-            output.details.state = ValetudoWifiConfiguration.STATE.NOT_CONNECTED;
+        //IPs are not part of the iw output
+        if (wifiStatus.state === ValetudoWifiStatus.STATE.CONNECTED) {
+            wifiStatus.details.ips = Tools.GET_CURRENT_HOST_IP_ADDRESSES().sort().filter(ip => {
+                return ip !== "127.0.0.1" && ip !== "::1";
+            });
         }
-        return new ValetudoWifiConfiguration(output);
+
+        return wifiStatus;
     }
 
     /**
@@ -69,6 +57,67 @@ class LinuxWifiConfigurationCapability extends WifiConfigurationCapability {
     async setWifiConfiguration(wifiConfig) {
         throw new NotImplementedError();
     }
+
+    /**
+     *
+     * @param {string} stdout
+     * @return {ValetudoWifiStatus}
+     */
+    parseIwStdout(stdout) {
+        const output = {
+            state: ValetudoWifiStatus.STATE.UNKNOWN,
+            details: {}
+        };
+
+        const connectedMatch = stdout.match(WIFI_CONNECTED_IW_REGEX);
+        if (connectedMatch) {
+            output.state = ValetudoWifiStatus.STATE.CONNECTED;
+            output.details.bssid = connectedMatch.groups.bssid.trim();
+
+            stdout.split("\n").splice(1).forEach(line => {
+                const lineMatch = line.match(WIFI_CONNECTED_TUPLE_REGEX);
+
+                if (lineMatch) {
+                    switch (lineMatch.groups.key.trim()) {
+                        case "SSID":
+                            output.details.ssid = lineMatch.groups.value.trim();
+
+                            break;
+                        case "tx bitrate": {
+                            const numberMatch = lineMatch.groups.value.match(NUMBER_REGEX);
+
+                            if (numberMatch) {
+                                output.details.upspeed = parseFloat(numberMatch.groups.number);
+                            }
+
+                            break;
+                        }
+                        case "signal": {
+                            const numberMatch = lineMatch.groups.value.match(NUMBER_REGEX);
+
+                            if (numberMatch) {
+                                output.details.signal = parseFloat(numberMatch.groups.number);
+                            }
+
+                            break;
+                        }
+
+                    }
+                }
+            });
+
+            output.details.frequency = ValetudoWifiStatus.FREQUENCY_TYPE.W2_4Ghz;
+        } else if (stdout.trim().match(WIFI_NOT_CONNECTED_IW_REGEX)) {
+            output.state = ValetudoWifiStatus.STATE.NOT_CONNECTED;
+        }
+
+        return new ValetudoWifiStatus(output);
+    }
 }
+
+const WIFI_CONNECTED_IW_REGEX = /^Connected to (?<bssid>[\da-f]{2}:[\da-f]{2}:[\da-f]{2}:[\da-f]{2}:[\da-f]{2}:[\da-f]{2})/;
+const WIFI_CONNECTED_TUPLE_REGEX = /(?<key>[a-zA-Z\s]+): (?<value>.*)/;
+const WIFI_NOT_CONNECTED_IW_REGEX = /^Not connected\.$/;
+const NUMBER_REGEX = /(?<number>[-0-9.]+)/;
 
 module.exports = LinuxWifiConfigurationCapability;

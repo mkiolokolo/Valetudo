@@ -19,11 +19,50 @@
                   "modelName": {
                     "type": "string"
                   },
+                  "modelDetails": {
+                    "type": "object",
+                    "properties": {
+                      "supportedAttachments": {
+                        "type": "array",
+                        "description": "Attachments that are detected and reported by the robot",
+                        "items": {
+                          "$ref": "#/components/schemas/AttachmentStateAttributeType"
+                        }
+                      },
+                      "supportedDockComponents": {
+                        "type": "array",
+                        "description": "Dock components that are detected and reported by the robot",
+                        "items": {
+                          "$ref": "#/components/schemas/DockComponentStateAttributeType"
+                        }
+                      }
+                    }
+                  },
                   "implementation": {
                     "type": "string",
                     "description": "Valetudo robot implementation in use"
                   }
                 }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/api/v2/robot/properties": {
+    "get": {
+      "tags": [
+        "Robot"
+      ],
+      "summary": "Get robot-specific properties",
+      "responses": {
+        "200": {
+          "description": "A flat key/value object containing 0..* properties that are specific to this robot.\n\nThis can for example be the firmware version.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
               }
             }
           }
@@ -57,10 +96,16 @@
                           "$ref": "#/components/schemas/BatteryStateAttribute"
                         },
                         {
-                          "$ref": "#/components/schemas/ConsumableStateAttribute"
+                          "$ref": "#/components/schemas/DockComponentStateAttribute"
+                        },
+                        {
+                          "$ref": "#/components/schemas/DockStatusStateAttribute"
                         },
                         {
                           "$ref": "#/components/schemas/PresetSelectionStateAttribute"
+                        },
+                        {
+                          "$ref": "#/components/schemas/StatusStateAttribute"
                         }
                       ]
                     }
@@ -98,10 +143,16 @@
                       "$ref": "#/components/schemas/BatteryStateAttribute"
                     },
                     {
-                      "$ref": "#/components/schemas/ConsumableStateAttribute"
+                      "$ref": "#/components/schemas/DockComponentStateAttribute"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DockStatusStateAttribute"
                     },
                     {
                       "$ref": "#/components/schemas/PresetSelectionStateAttribute"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StatusStateAttribute"
                     }
                   ]
                 }

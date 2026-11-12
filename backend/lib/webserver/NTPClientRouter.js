@@ -20,8 +20,11 @@ class NTPClientRouter {
 
 
     initRoutes() {
-        this.router.get("/state", (req, res) => {
-            res.json(this.ntpClient.state);
+        this.router.get("/status", (req, res) => {
+            res.json({
+                state: this.ntpClient.state,
+                robotTime: new Date().toISOString()
+            });
         });
 
         this.router.get("/config", (req, res) => {
@@ -29,9 +32,15 @@ class NTPClientRouter {
         });
 
         this.router.put("/config", this.validator, (req, res) => {
-            this.config.set("ntpClient", req.body);
+            this.config.set("ntpClient", {
+                enabled: req.body.enabled,
+                server: req.body.server,
+                port: req.body.port,
+                interval: req.body.interval,
+                timeout: req.body.timeout
+            });
 
-            res.sendStatus(202);
+            res.sendStatus(200);
         });
     }
 

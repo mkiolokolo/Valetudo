@@ -1,4 +1,5 @@
-const {EventEmitter} = require("events");
+const EventEmitter = require("events").EventEmitter;
+const ValetudoEvents = require("./valetudo_events/events");
 
 class ValetudoEventStore {
     /**
@@ -42,6 +43,31 @@ class ValetudoEventStore {
 
     /**
      * @public
+     * @param {Array<any>} serializedEvents
+     */
+    rehydrateEvents(serializedEvents) {
+        if (!Array.isArray(serializedEvents)) {
+            return;
+        }
+
+        for (const evt of [...serializedEvents].reverse()) {
+            if (
+                evt.__class &&
+                Object.hasOwn(ValetudoEvents, evt.__class) &&
+                typeof ValetudoEvents[evt.__class] === "function"
+            ) {
+                const eventObj = new ValetudoEvents[evt.__class]({
+                    ...evt,
+                    timestamp: new Date(evt.timestamp)
+                });
+
+                this.raise(eventObj);
+            }
+        }
+    }
+
+    /**
+     * @public
      * @param {import("./valetudo_events/events/ValetudoEvent")} event
      */
     raise(event) {
@@ -53,6 +79,32 @@ class ValetudoEventStore {
 
         this.events.set(event.id, event);
         this.eventEmitter.emit(EVENT_RAISED, event);
+        this.eventEmitter.emit(EVENTS_UPDATED, event);
+    }
+
+    /**
+     * Sometimes, events might stop being relevant due to external circumstances
+     * In these situations, this can be called to set them processed without an interaction
+     *
+     * @public
+     * @param {string} event_id
+     * @return {void}
+     */
+    setProcessed(event_id) {
+        const event = this.getById(event_id);
+
+        if (!event) {
+            throw new Error("No such Event");
+        }
+
+        if (event.processed === true) {
+            return;
+        }
+
+        event.processed = true;
+        //Even though this isn't required as we're interfacing with it by reference. Just for good measure
+        this.events.set(event.id, event);
+        this.eventEmitter.emit(EVENTS_UPDATED, event);
     }
 
     /**
@@ -61,6 +113,14 @@ class ValetudoEventStore {
      */
     onEventRaised(listener) {
         this.eventEmitter.on(EVENT_RAISED, listener);
+    }
+
+    /**
+     * @param {*} listener
+     * @public
+     */
+    onEventsUpdated(listener) {
+        this.eventEmitter.on(EVENTS_UPDATED, listener);
     }
 
     /**
@@ -82,11 +142,8 @@ class ValetudoEventStore {
             const result = await handler.interact(interaction);
 
             if (result === true) {
-                event.processed = true;
+                this.setProcessed(event.id);
             }
-
-            //Even though this isn't required as we're interfacing with it by reference. Just for good measure
-            this.events.set(event.id, event);
         } else {
             throw new Error("Missing Handler for Event: " + event.__class);
         }
@@ -96,5 +153,6 @@ class ValetudoEventStore {
 
 const LIMIT = 50;
 const EVENT_RAISED = "event_raised";
+const EVENTS_UPDATED = "events_updated";
 
 module.exports = ValetudoEventStore;

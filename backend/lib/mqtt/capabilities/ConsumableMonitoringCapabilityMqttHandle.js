@@ -1,14 +1,16 @@
 const CapabilityMqttHandle = require("./CapabilityMqttHandle");
 
+const Commands = require("../common/Commands");
 const ComponentType = require("../homeassistant/ComponentType");
 const DataType = require("../homie/DataType");
+const DeviceClass = require("../homeassistant/DeviceClass");
+const EntityCategory = require("../homeassistant/EntityCategory");
 const HassAnchor = require("../homeassistant/HassAnchor");
 const InLineHassComponent = require("../homeassistant/components/InLineHassComponent");
-const Logger = require("../../Logger");
 const PropertyMqttHandle = require("../handles/PropertyMqttHandle");
-const stateAttrs = require("../../entities/state/attributes");
+const StateClass = require("../homeassistant/StateClass");
 const Unit = require("../common/Unit");
-const {Commands} = require("../common");
+const ValetudoConsumable = require("../../entities/core/ValetudoConsumable");
 
 class ConsumableMonitoringCapabilityMqttHandle extends CapabilityMqttHandle {
     /**
@@ -22,116 +24,149 @@ class ConsumableMonitoringCapabilityMqttHandle extends CapabilityMqttHandle {
         super(Object.assign(options, {
             friendlyName: "Consumables monitoring",
             helpMayChange: {
-                "Properties": "Consumables depend on the robot model and may be discovered at runtime. Always look" +
-                    " for changes in `$properties` while `$state` is `init`.",
+                "Properties": "Consumables depend on the robot model.",
                 "Property datatype and units": "Some robots send consumables as remaining time, others send them as " +
                     "endurance percent remaining.",
             }
         }));
         this.capability = options.capability;
+        /* @type {Array<import("../../entities/core/ValetudoConsumable")>} */
+        this.consumables = [];
 
-        this.registerChild(
-            new PropertyMqttHandle({
-                parent: this,
-                controller: this.controller,
-                topicName: "refresh",
-                friendlyName: "Refresh consumables",
-                datatype: DataType.ENUM,
-                format: Commands.BASIC.PERFORM,
-                setter: async (value) => {
-                    await this.capability.getConsumables();
-                },
-                helpText: "If set to `" + Commands.BASIC.PERFORM + "`, it will attempt to refresh the consumables " +
-                    "from the robot. Note that there's no need to do it manually, consumables are refreshed " +
-                    "automatically every 30 seconds by default.",
-            })
-        );
-
-        this.registeredConsumables = [];
-        this.lastGetConsumables = 0;
+        this.capability.getProperties().availableConsumables.forEach(consumable => {
+            this.addNewConsumable(
+                this.genConsumableTopicId(consumable.type, consumable.subType),
+                consumable.type,
+                consumable.subType,
+                consumable.unit
+            );
+        });
     }
 
     /**
      * @private
-     * @param {import("../../entities/state/attributes/ConsumableStateAttribute")} attribute
+     * @param {import("../../entities/core/ValetudoConsumable").TYPE} type
+     * @param {import("../../entities/core/ValetudoConsumable").SUB_TYPE} subType
      * @return {string}
      */
-    genConsumableTopicId(attribute) {
-        let name = attribute.type;
-        if (attribute.subType !== stateAttrs.ConsumableStateAttribute.SUB_TYPE.NONE) {
-            name += "-" + attribute.subType;
+    genConsumableTopicId(type, subType) {
+        let name = type;
+        if (subType !== ValetudoConsumable.SUB_TYPE.NONE) {
+            name += "-" + subType;
         }
         return name;
     }
 
     /**
      * @private
-     * @param {import("../../entities/state/attributes/ConsumableStateAttribute")} attribute
+     * @param {import("../../entities/core/ValetudoConsumable").TYPE} type
+     * @param {import("../../entities/core/ValetudoConsumable").SUB_TYPE} subType
      * @return {string}
      */
-    genConsumableFriendlyName(attribute) {
+    genConsumableFriendlyName(type, subType) {
         let name = "";
-        if (attribute.subType !== stateAttrs.ConsumableStateAttribute.SUB_TYPE.NONE && attribute.subType !== stateAttrs.ConsumableStateAttribute.SUB_TYPE.ALL) {
-            name += SUBTYPE_MAPPING[attribute.subType] + " ";
+        if (subType !== ValetudoConsumable.SUB_TYPE.NONE && subType !== ValetudoConsumable.SUB_TYPE.ALL) {
+            name += SUBTYPE_MAPPING[subType] + " ";
         }
-        name += TYPE_MAPPING[attribute.type];
+        name += TYPE_MAPPING[type];
         return name;
     }
 
     /**
      * @private
      * @param {string} topicId
-     * @param {import("../../entities/state/attributes/ConsumableStateAttribute")} attr
-     * @return {Promise<void>}
+     * @param {import("../../entities/core/ValetudoConsumable").TYPE} type
+     * @param {import("../../entities/core/ValetudoConsumable").SUB_TYPE} subType
+     * @param {import("../../entities/core/ValetudoConsumable").UNITS} unit
+     * @return {void}
      */
-    async addNewConsumable(topicId, attr) {
-        this.registeredConsumables.push(topicId);
-
+    addNewConsumable(topicId, type, subType, unit) {
         this.registerChild(
             new PropertyMqttHandle({
                 parent: this,
                 controller: this.controller,
                 topicName: topicId,
-                friendlyName: this.genConsumableFriendlyName(attr),
-                datatype: attr.remaining.unit === stateAttrs.ConsumableStateAttribute.UNITS.PERCENT ? DataType.INTEGER : DataType.DURATION,
-                unit: attr.remaining.unit === stateAttrs.ConsumableStateAttribute.UNITS.PERCENT ? Unit.PERCENT : undefined,
-                format: attr.remaining.unit === stateAttrs.ConsumableStateAttribute.UNITS.PERCENT ? "0:100" : undefined,
+                friendlyName: this.genConsumableFriendlyName(type, subType),
+                datatype: DataType.INTEGER,
+                unit: unit === ValetudoConsumable.UNITS.PERCENT ? Unit.PERCENT : undefined,
+                format: unit === ValetudoConsumable.UNITS.PERCENT ? "0:100" : undefined,
                 getter: async () => {
-                    const newAttr = this.robot.state.getFirstMatchingAttribute({
-                        attributeClass: stateAttrs.ConsumableStateAttribute.name,
-                        attributeType: attr.type,
-                        attributeSubType: attr.subType
-                    });
-                    if (newAttr) {
+                    const consumable = this.consumables.find(c => c.type === type && c.subType === subType);
+
+                    if (consumable) {
                         // Raw value for Home Assistant
-                        await HassAnchor.getAnchor(HassAnchor.ANCHOR.CONSUMABLE_VALUE + topicId)
-                            .post(newAttr.remaining.value);
+                        await this.controller.hassAnchorProvider.getAnchor(
+                            HassAnchor.ANCHOR.CONSUMABLE_VALUE + topicId
+                        ).post(consumable.remaining.value);
+
                         // Convert value to seconds for Homie
-                        return newAttr.remaining.value * (attr.remaining.unit === stateAttrs.ConsumableStateAttribute.UNITS.PERCENT ? 1 : 60);
+                        return consumable.remaining.value * (unit === ValetudoConsumable.UNITS.PERCENT ? 1 : 60);
                     }
+
                     return null;
                 },
-                helpText: attr.remaining.unit === stateAttrs.ConsumableStateAttribute.UNITS.PERCENT ?
+                helpText: unit === ValetudoConsumable.UNITS.PERCENT ?
                     "This handle returns the consumable remaining endurance percentage." :
-                    "This handle returns the consumable remaining endurance time as an ISO8601 duration. " +
-                    "The controlled Home Assistant component will report it as seconds instead."
+                    "This handle returns the consumable remaining endurance time as an int representing seconds remaining."
             }).also((prop) => {
                 this.controller.withHass((hass) => {
                     prop.attachHomeAssistantComponent(
                         new InLineHassComponent({
                             hass: hass,
                             robot: this.robot,
-                            name: this.capability.getType() + "_" + topicId.replace("-", "_"),
-                            friendlyName: this.genConsumableFriendlyName(attr),
+                            name: `${this.capability.getType()}_${topicId.replace("-", "_")}`,
+                            friendlyName: this.genConsumableFriendlyName(type, subType),
                             componentType: ComponentType.SENSOR,
-                            baseTopicReference: HassAnchor.getTopicReference(HassAnchor.REFERENCE.HASS_CONSUMABLE_STATE + topicId),
+                            baseTopicReference: this.controller.hassAnchorProvider.getTopicReference(
+                                HassAnchor.REFERENCE.HASS_CONSUMABLE_STATE + topicId
+                            ),
                             autoconf: {
-                                state_topic: HassAnchor.getTopicReference(HassAnchor.REFERENCE.HASS_CONSUMABLE_STATE + topicId),
-                                unit_of_measurement: attr.remaining.unit === stateAttrs.ConsumableStateAttribute.UNITS.PERCENT ? "Percent" : "Minutes",
+                                state_topic: this.controller.hassAnchorProvider.getTopicReference(
+                                    HassAnchor.REFERENCE.HASS_CONSUMABLE_STATE + topicId
+                                ),
+                                unit_of_measurement: unit === ValetudoConsumable.UNITS.PERCENT ? Unit.PERCENT : Unit.MINUTES,
                                 icon: "mdi:progress-wrench",
+                                entity_category: EntityCategory.DIAGNOSTIC,
+                                state_class: StateClass.MEASUREMENT,
+                                device_class: unit === ValetudoConsumable.UNITS.MINUTES ? DeviceClass.DURATION : undefined
                             },
                             topics: {
-                                "": HassAnchor.getAnchor(HassAnchor.ANCHOR.CONSUMABLE_VALUE + topicId)
+                                "": this.controller.hassAnchorProvider.getAnchor(
+                                    HassAnchor.ANCHOR.CONSUMABLE_VALUE + topicId
+                                )
+                            }
+                        })
+                    );
+                });
+            })
+        );
+
+        this.registerChild(
+            new PropertyMqttHandle({
+                parent: this,
+                controller: this.controller,
+                topicName: `${topicId}/reset`,
+                friendlyName: "Reset the consumable",
+                datatype: DataType.ENUM,
+                format: Commands.BASIC.PERFORM,
+                setter: async (value) => {
+                    await this.capability.resetConsumable(type, subType);
+                    await this.updateInternalState(); // FIXME: this should also republish the state of the other child
+                }
+            }).also((prop) => {
+                this.controller.withHass((hass) => {
+                    prop.attachHomeAssistantComponent(
+                        new InLineHassComponent({
+                            hass: hass,
+                            robot: this.robot,
+                            name: `${this.capability.getType()}_${topicId.replace("-", "_")}_reset`,
+                            friendlyName: `Reset ${this.genConsumableFriendlyName(type, subType)} Consumable`,
+                            componentType: ComponentType.BUTTON,
+                            autoconf: {
+                                command_topic: `${prop.getBaseTopic()}/set`,
+                                payload_press: Commands.BASIC.PERFORM,
+                                icon: "mdi:restore",
+                                entity_category: EntityCategory.DIAGNOSTIC
                             }
                         })
                     );
@@ -140,69 +175,44 @@ class ConsumableMonitoringCapabilityMqttHandle extends CapabilityMqttHandle {
         );
     }
 
-    async findNewConsumables() {
-        const consumables = this.robot.state.getMatchingAttributes(this.getInterestingStatusAttributes()[0]);
-        const newConsumables = {};
-        for (const attr of consumables) {
-            const topicId = this.genConsumableTopicId(attr);
-            if (!this.registeredConsumables.includes(topicId)) {
-                newConsumables[topicId] = attr;
-            }
-        }
-        if (Object.keys(newConsumables).length > 0) {
-            await this.controller.reconfigure(async () => {
-                await this.deconfigure({
-                    cleanValues: false,
-                    cleanHomie: false,
-                    cleanHass: false,
-                });
-                for (const [topicId, attr] of Object.entries(newConsumables)) {
-                    await this.addNewConsumable(topicId, attr);
-                }
-                await this.configure();
-            });
-        }
-    }
-
     async refresh() {
-        await this.findNewConsumables();
+        await this.updateInternalState();
         await super.refresh();
-
-        // Warning: hack
-        if (this.controller.refreshInterval) {
-            // Avoid causing a recursion chain (newly added consumables will cause refresh to be called)
-            if (this.lastGetConsumables + this.controller.refreshInterval * 1000 > Date.now()) {
-                return;
-            }
-            this.lastGetConsumables = Date.now();
-
-            setTimeout(() => {
-                this.capability.getConsumables().catch((reason => {
-                    Logger.warn("Failed to get consumables:", reason);
-                }));
-            }, 10000);
-        }
     }
 
-    getInterestingStatusAttributes() {
-        return [{attributeClass: stateAttrs.ConsumableStateAttribute.name}];
+    async updateInternalState() {
+        let newConsumables;
+        try {
+            newConsumables = await this.capability.getConsumables();
+
+            this.consumables = newConsumables;
+        } catch (e) {
+            /* intentional */
+        }
     }
 }
 
 const TYPE_MAPPING = Object.freeze({
-    "brush": "Brush",
-    "filter": "Filter",
-    "sensor": "Sensor cleaning",
-    "mop": "Mop"
+    [ValetudoConsumable.TYPE.BRUSH]: "Brush",
+    [ValetudoConsumable.TYPE.FILTER]: "Filter",
+    [ValetudoConsumable.TYPE.CLEANING]: "Cleaning",
+    [ValetudoConsumable.TYPE.MOP]: "Mop",
+    [ValetudoConsumable.TYPE.DETERGENT]: "Detergent",
+    [ValetudoConsumable.TYPE.BIN]: "Bin",
 });
 
 const SUBTYPE_MAPPING = Object.freeze({
-    "main": "Main",
-    "side_right": "Right",
-    "side_left": "Left",
-    "all": "",
-    "none": ""
+    [ValetudoConsumable.SUB_TYPE.MAIN]: "Main",
+    [ValetudoConsumable.SUB_TYPE.SECONDARY]: "Secondary",
+    [ValetudoConsumable.SUB_TYPE.SIDE_RIGHT]: "Right",
+    [ValetudoConsumable.SUB_TYPE.SIDE_LEFT]: "Left",
+    [ValetudoConsumable.SUB_TYPE.ALL]: "",
+    [ValetudoConsumable.SUB_TYPE.NONE]: "",
+    [ValetudoConsumable.SUB_TYPE.DOCK]: "Dock",
+    [ValetudoConsumable.SUB_TYPE.SENSOR]: "Sensor",
+    [ValetudoConsumable.SUB_TYPE.WHEEL]: "Wheel",
 });
 
+ConsumableMonitoringCapabilityMqttHandle.OPTIONAL = true;
 
 module.exports = ConsumableMonitoringCapabilityMqttHandle;

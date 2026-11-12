@@ -1,4 +1,7 @@
+const capabilities = require("./capabilities");
 const MiioValetudoRobot = require("../MiioValetudoRobot");
+const QuirksCapability = require("../../core/capabilities/QuirksCapability");
+const ViomiQuirkFactory = require("./ViomiQuirkFactory");
 const ViomiValetudoRobot = require("./ViomiValetudoRobot");
 
 
@@ -12,16 +15,30 @@ class ViomiV7ValetudoRobot extends ViomiValetudoRobot {
      */
     constructor(options) {
         super(options);
-        // TODO: register model-specific capabilities
+
+        this.registerCapability(new capabilities.ViomiCleanRouteControlCapability({
+            robot: this
+        }));
+
+        const quirkFactory = new ViomiQuirkFactory({
+            robot: this
+        });
+        this.registerCapability(new QuirksCapability({
+            robot: this,
+            quirks: [
+                quirkFactory.getQuirk(ViomiQuirkFactory.KNOWN_QUIRKS.BUTTON_LEDS),
+                quirkFactory.getQuirk(ViomiQuirkFactory.KNOWN_QUIRKS.OUTLINE_MODE),
+            ]
+        }));
     }
 
     getModelName() {
-        return "Xiaomi Mi Robot Vacuum-Mop P";
+        return "V7";
     }
 
     static IMPLEMENTATION_AUTO_DETECTION_HANDLER() {
         const deviceConf = MiioValetudoRobot.READ_DEVICE_CONF(ViomiValetudoRobot.DEVICE_CONF_PATH);
-        return !!(deviceConf && ["viomi.vacuum.v6", "viomi.vacuum.v7", "viomi.vacuum.v8", "viomi.vacuum.v9"].includes(deviceConf.model));
+        return !!(deviceConf && deviceConf.model === "viomi.vacuum.v7");
     }
 }
 

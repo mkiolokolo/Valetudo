@@ -1,26 +1,44 @@
-const Logger = require("../../Logger");
-
 const CapabilityRouter = require("./CapabilityRouter");
 const ValetudoWifiConfiguration = require("../../entities/core/ValetudoWifiConfiguration");
 
 class WifiConfigurationCapabilityRouter extends CapabilityRouter {
-
     initRoutes() {
         this.router.get("/", async (req, res) => {
-            res.json(await this.capability.getWifiConfiguration());
+            try {
+                res.json(await this.capability.getWifiStatus());
+            } catch (e) {
+                this.sendErrorResponse(req, res, e);
+            }
         });
 
         this.router.put("/", this.validator, async (req, res) => {
-            if (req.body) {
-                try {
-                    await this.capability.setWifiConfiguration(new ValetudoWifiConfiguration(req.body));
-                    res.sendStatus(200);
-                } catch (e) {
-                    Logger.warn("Error while setting wifi configuration", e);
-                    res.status(500).json(e.message);
+            try {
+                let typeSpecificSettings;
+
+                switch (req.body.credentials.type) {
+                    case ValetudoWifiConfiguration.CREDENTIALS_TYPE.WPA2_PSK:
+                        typeSpecificSettings = {
+                            password: req.body.credentials.typeSpecificSettings.password
+                        };
+                        break;
+                    default:
+                        typeSpecificSettings = {};
                 }
-            } else {
-                res.status(400).send("Missing request body");
+
+                await this.capability.setWifiConfiguration(new ValetudoWifiConfiguration({
+                    ssid: req.body.ssid,
+                    credentials: {
+                        type: req.body.credentials.type,
+                        typeSpecificSettings: typeSpecificSettings
+                    },
+                    metaData: {
+                        force: req.body.metaData?.force === true
+                    }
+                }));
+
+                res.sendStatus(200);
+            } catch (e) {
+                this.sendErrorResponse(req, res, e);
             }
         });
     }

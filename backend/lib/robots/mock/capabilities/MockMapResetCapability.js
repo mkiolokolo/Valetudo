@@ -1,14 +1,14 @@
 const MapResetCapability = require("../../../core/capabilities/MapResetCapability");
 
 /**
- * @extends MapResetCapability<import("../MockRobot")>
+ * @extends MapResetCapability<import("../MockValetudoRobot")>
  */
 class MockMapResetCapability extends MapResetCapability {
     /**
      * @returns {Promise<void>}
      */
     async reset() {
-        await this.robot.buildMap();
+        this.robot.buildMap();
     }
 }
 

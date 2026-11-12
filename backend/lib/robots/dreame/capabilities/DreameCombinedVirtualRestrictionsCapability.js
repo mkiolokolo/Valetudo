@@ -4,6 +4,7 @@
 
 const CombinedVirtualRestrictionsCapability = require("../../../core/capabilities/CombinedVirtualRestrictionsCapability");
 const DreameMapParser = require("../DreameMapParser");
+const RobotFirmwareError = require("../../../core/RobotFirmwareError");
 const ValetudoRestrictedZone = require("../../../entities/core/ValetudoRestrictedZone");
 
 /**
@@ -58,14 +59,6 @@ class DreameCombinedVirtualRestrictionsCapability extends CombinedVirtualRestric
          * We won't use that so we'll leave this out.
          */
 
-        if (virtualRestrictions.virtualWalls.length >= 10) {
-            throw new Error("Too many virtual Walls to save");
-        }
-
-        if (virtualRestrictions.restrictedZones.length >= 10) {
-            throw new Error("Too many restricted zones to save");
-        }
-
         virtualRestrictions.virtualWalls.forEach(wall => {
             const pA = DreameMapParser.CONVERT_TO_DREAME_COORDINATES(wall.points.pA.x, wall.points.pA.y);
             const pB = DreameMapParser.CONVERT_TO_DREAME_COORDINATES(wall.points.pB.x, wall.points.pB.y);
@@ -103,7 +96,7 @@ class DreameCombinedVirtualRestrictionsCapability extends CombinedVirtualRestric
             ]);
         });
 
-        await this.robot.sendCommand("action",
+        const res = await this.robot.sendCommand("action",
             {
                 did: this.robot.deviceId,
                 siid: this.miot_actions.map_edit.siid,
@@ -115,25 +108,26 @@ class DreameCombinedVirtualRestrictionsCapability extends CombinedVirtualRestric
                     }
                 ]
             }
-        ).then(res => {
-            if (
-                res && res.siid === this.miot_actions.map_edit.siid &&
-                res.aiid === this.miot_actions.map_edit.aiid &&
-                Array.isArray(res.out) && res.out.length === 1 &&
-                res.out[0].piid === this.miot_properties.actionResult.piid
-            ) {
-                switch (res.out[0].value) {
-                    case 0:
-                        return;
-                    case 10:
-                        throw new Error("Cannot save temporary virtual restrictions. A persistent map exists.");
-                    default:
-                        throw new Error("Got error " + res.out[0].value + " while saving virtual restrictions.");
-                }
+        );
+
+        if (
+            res && res.siid === this.miot_actions.map_edit.siid &&
+            res.aiid === this.miot_actions.map_edit.aiid &&
+            Array.isArray(res.out) && res.out.length === 1 &&
+            res.out[0].piid === this.miot_properties.actionResult.piid
+        ) {
+            switch (res.out[0].value) {
+                case 0:
+                    this.robot.pollMap();
+                    return;
+                case 10:
+                    throw new RobotFirmwareError("Cannot save temporary virtual restrictions. A persistent map exists.");
+                case 11:
+                    throw new RobotFirmwareError("Cannot save virtual restrictions. No persistent map exists. Let the robot do a full clean before saving restrictions.");
+                default:
+                    throw new RobotFirmwareError("Got error " + res.out[0].value + " while saving virtual restrictions.");
             }
-        }).finally(() => {
-            this.robot.pollMap();
-        });
+        }
     }
 }
 

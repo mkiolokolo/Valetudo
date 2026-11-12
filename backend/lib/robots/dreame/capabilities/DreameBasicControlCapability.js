@@ -34,58 +34,19 @@ class DreameBasicControlCapability extends BasicControlCapability {
     }
 
     async start() {
-        const res = await this.robot.sendCommand("action",
-            {
-                did: this.robot.deviceId,
-                siid: this.miot_actions.start.siid,
-                aiid: this.miot_actions.start.aiid,
-                in: []
-            });
-
-        if (res.code !== 0) {
-            throw new Error("Error code " + res.code);
-        }
+        await this.robot.miotHelper.executeAction(this.miot_actions.start.siid, this.miot_actions.start.aiid);
     }
 
     async stop() {
-        const res = await this.robot.sendCommand("action", {
-            did: this.robot.deviceId,
-            siid: this.miot_actions.stop.siid,
-            aiid: this.miot_actions.stop.aiid,
-            in: []
-        });
-
-        if (res.code !== 0) {
-            throw new Error("Error code " + res.code);
-        }
+        await this.robot.miotHelper.executeAction(this.miot_actions.stop.siid, this.miot_actions.stop.aiid);
     }
 
     async pause() {
-        const res = await this.robot.sendCommand("action", {
-            did: this.robot.deviceId,
-            siid: this.miot_actions.pause.siid,
-            aiid: this.miot_actions.pause.aiid,
-            in: []
-        });
-
-        if (res.code !== 0) {
-            throw new Error("Error code " + res.code);
-        }
+        await this.robot.miotHelper.executeAction(this.miot_actions.pause.siid, this.miot_actions.pause.aiid);
     }
 
     async home() {
-        const res = await this.robot.sendCommand("action",
-            {
-                did: this.robot.deviceId,
-                siid: this.miot_actions.home.siid,
-                aiid: this.miot_actions.home.aiid,
-                in: []
-            }
-        );
-
-        if (res.code !== 0) {
-            throw new Error("Error code " + res.code);
-        }
+        await this.robot.miotHelper.executeAction(this.miot_actions.home.siid, this.miot_actions.home.aiid);
     }
 }
 

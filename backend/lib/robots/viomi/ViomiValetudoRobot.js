@@ -2,12 +2,13 @@ const attributes = require("./ViomiCommonAttributes");
 const capabilities = require("./capabilities");
 const entities = require("../../entities");
 const fs = require("fs");
+const LinuxWifiScanCapability = require("../common/linuxCapabilities/LinuxWifiScanCapability");
 const Logger = require("../../Logger");
 const miioCapabilities = require("../common/miioCapabilities");
 const MiioValetudoRobot = require("../MiioValetudoRobot");
+const ThreeIRobotixMapParser = require("../3irobotix/ThreeIRobotixMapParser");
+const ValetudoRobotError = require("../../entities/core/ValetudoRobotError");
 const ValetudoSelectionPreset = require("../../entities/core/ValetudoSelectionPreset");
-const ViomiMapParser = require("./ViomiMapParser");
-const zlib = require("zlib");
 
 const stateAttrs = entities.state.attributes;
 const mapActions = Object.freeze({
@@ -26,9 +27,7 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
      */
     constructor(options) {
         super(options);
-        this.debugConfig = options.config.get("debug");
 
-        this.lastMapPoll = new Date(0);
         if (options.fanSpeeds !== undefined) {
             this.fanSpeeds = options.fanSpeeds;
         } else {
@@ -43,25 +42,39 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
         this.ephemeralState = {
             carpetModeEnabled: undefined,
             lastOperationType: null,
-            lastOperationAdditionalParams: []
+            lastOperationAdditionalParams: [],
+            outlineModeEnabled: false,
+            vendorMapId: 0
         };
 
         this.registerCapability(new capabilities.ViomiBasicControlCapability({
             robot: this
         }));
 
+        this.registerCapability(new capabilities.ViomiOperationModeControlCapability({
+            robot: this,
+            presets: Object.keys(attributes.ViomiOperationMode).map(k => {
+                return new ValetudoSelectionPreset({name: k, value: attributes.ViomiOperationMode[k]});
+            }),
+        }));
+
         this.registerCapability(new capabilities.ViomiFanSpeedControlCapability({
             robot: this,
-            presets: Object.keys(this.fanSpeeds).map(k => new ValetudoSelectionPreset({name: k, value: this.fanSpeeds[k]}))
+            presets: Object.keys(this.fanSpeeds).map(k => {
+                return new ValetudoSelectionPreset({name: k, value: this.fanSpeeds[k]});
+            })
         }));
 
         this.registerCapability(new capabilities.ViomiWaterUsageControlCapability({
             robot: this,
-            presets: Object.keys(this.waterGrades).map(k => new ValetudoSelectionPreset({name: k, value: this.waterGrades[k]}))
+            presets: Object.keys(this.waterGrades).map(k => {
+                return new ValetudoSelectionPreset({name: k, value: this.waterGrades[k]});
+            })
         }));
 
         this.registerCapability(new miioCapabilities.MiioWifiConfigurationCapability({
-            robot: this
+            robot: this,
+            networkInterface: "wlan0"
         }));
 
         this.registerCapability(new capabilities.ViomiLocateCapability({
@@ -69,6 +82,10 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
         }));
 
         this.registerCapability(new capabilities.ViomiConsumableMonitoringCapability({
+            robot: this
+        }));
+
+        this.registerCapability(new capabilities.ViomiCurrentStatisticsCapability({
             robot: this
         }));
 
@@ -81,10 +98,6 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
         }));
 
         this.registerCapability(new capabilities.ViomiZoneCleaningCapability({
-            robot: this
-        }));
-
-        this.registerCapability(new capabilities.ViomiVoicePackManagementCapability({
             robot: this
         }));
 
@@ -127,24 +140,10 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
             robot: this
         }));
 
-        this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
-            type: stateAttrs.AttachmentStateAttribute.TYPE.DUSTBIN,
-            attached: false
-        }));
-
-        this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
-            type: stateAttrs.AttachmentStateAttribute.TYPE.WATERTANK,
-            attached: false
-        }));
-
-        this.state.upsertFirstMatchingAttribute(new stateAttrs.AttachmentStateAttribute({
-            type: stateAttrs.AttachmentStateAttribute.TYPE.MOP,
-            attached: true
-        }));
-
-        if (this.debugConfig.enableDebugCapability) {
-            this.registerCapability(new capabilities.ViomiDebugCapability({
-                robot: this
+        if (this.config.get("embedded") === true) {
+            this.registerCapability(new LinuxWifiScanCapability({
+                robot: this,
+                networkInterface: "wlan0"
             }));
         }
     }
@@ -164,11 +163,12 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
      * @param {object} options
      * @param {number=} options.retries
      * @param {number=} options.timeout custom timeout in milliseconds
+     * @param {"local"|"cloud"=} options.interface
      * @returns {Promise<object>}
      */
     sendCommand(method, args = [], options = {}) {
         options = Object.assign({
-            timeout: 2000,
+            timeout: typeof options.timeout === "number" ? Math.max(3000, options.timeout) : 3000,
         }, options);
         return super.sendCommand(method, args, options);
     }
@@ -189,15 +189,33 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
         return super.sendCloud(msg, options);
     }
 
-    onMessage(msg) {
+    onIncomingCloudMessage(msg) {
         if (msg.method?.startsWith("prop.")) {
             this.parseAndUpdateState({
-                [msg.method.substr(5)]: msg.params[0]
+                [msg.method.slice(5)]: msg.params[0]
             });
 
             return true;
         }
-        return super.onMessage(msg);
+
+        if (msg.method?.startsWith("event.")) {
+            this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                Logger.warn("Error while sending cloud ack", err);
+            });
+            return true;
+        }
+
+
+        if (msg.method === "props") {
+            if (msg.params?.ota_state !== undefined) {
+                this.sendCloud({id: msg.id, "result":"ok"}).catch((err) => {
+                    Logger.warn("Error while sending cloud ack", err);
+                });
+                return true;
+            }
+        }
+
+        return super.onIncomingCloudMessage(msg);
     }
 
     async pollState() {
@@ -205,14 +223,15 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
 
         if (response) {
             let statusDict = {};
-            STATE_PROPERTIES.forEach((key, index) => statusDict[key] = response[index]);
+            STATE_PROPERTIES.forEach((key, index) => {
+                statusDict[key] = response[index];
+            });
             this.parseAndUpdateState(statusDict);
         }
 
         return this.state;
     }
 
-    //TODO: viomi repolls the map on status change to quick poll states. We probably should do the same
     parseAndUpdateState(data) {
         let newStateAttr;
 
@@ -223,6 +242,7 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
             let status;
             let error;
             let statusValue;
+            let statusError;
             let statusMetaData = {};
 
             const previousState = this.state.getFirstMatchingAttributeByConstructor(stateAttrs.StatusStateAttribute);
@@ -241,42 +261,55 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
                 }
             }
 
+            // Need to remember this since we have to send it back when starting a cleaning operation
+            this.ephemeralState.outlineModeEnabled = data["mode"] === 2;
 
             if (error !== undefined) {
                 if (error.value === stateAttrs.StatusStateAttribute.VALUE.ERROR) {
+                    //TODO: classify errors
+                    statusError = new ValetudoRobotError({
+                        severity: {
+                            kind: ValetudoRobotError.SEVERITY_KIND.UNKNOWN,
+                            level: ValetudoRobotError.SEVERITY_LEVEL.UNKNOWN,
+                        },
+                        subsystem: ValetudoRobotError.SUBSYSTEM.UNKNOWN,
+                        message: error.desc,
+                        vendorErrorCode: data["err_state"]
+                    });
                     // If status is an error, mark it as such
-                    statusMetaData.error_code = data["err_state"];
                     statusValue = stateAttrs.StatusStateAttribute.VALUE.ERROR;
-                } else if (status === undefined) {
-                    // If it is not an error but we don't have any status data, use the status code from the error
-                    statusValue = error.value;
-                }
-                // Some errors are rather "warnings": keep the error description if we have one
-                if (error.desc !== undefined) {
-                    statusMetaData.error_description = error.desc;
                 }
             }
 
             let statusFlag = stateAttrs.StatusStateAttribute.FLAG.NONE;
-            if (this.ephemeralState.lastOperationType !== null &&
-                (statusValue === stateAttrs.StatusStateAttribute.VALUE.CLEANING || statusValue === stateAttrs.StatusStateAttribute.VALUE.PAUSED)) {
+            if (
+                this.ephemeralState.lastOperationType !== null &&
+                (statusValue === stateAttrs.StatusStateAttribute.VALUE.CLEANING || statusValue === stateAttrs.StatusStateAttribute.VALUE.PAUSED)
+            ) {
                 statusFlag = this.ephemeralState.lastOperationType;
             } else if (this.ephemeralState.lastOperationType !== null && statusValue === stateAttrs.StatusStateAttribute.VALUE.RETURNING) {
-                // Operation completed without pausing, cleanup last operation so we don't try to resume next time
-                // We only cleanup on "RETURNING" to avoid race conditions in case we set lastOperation and the vacuum
+                // Operation completed without pausing, cleanup last operation, so we don't try to resume next time
+                // We only clean up on "RETURNING" to avoid race conditions in case we set lastOperation and the vacuum
                 // takes some time to update the status.
                 this.ephemeralState.lastOperationType = null;
                 this.ephemeralState.lastOperationAdditionalParams = [];
             }
 
-            //TODO: trigger re-poll of map if new status is fast polling state
-            newStateAttr = new stateAttrs.StatusStateAttribute({
-                value: statusValue,
-                flag: statusFlag,
-                metaData: statusMetaData
-            });
+            if (statusValue !== undefined) {
+                newStateAttr = new stateAttrs.StatusStateAttribute({
+                    value: statusValue,
+                    flag: statusFlag,
+                    metaData: statusMetaData,
+                    error: statusError
+                });
 
-            this.state.upsertFirstMatchingAttribute(newStateAttr);
+                this.state.upsertFirstMatchingAttribute(newStateAttr);
+
+                if (newStateAttr.isActiveState) {
+                    this.pollMap();
+                }
+            }
+
         }
 
         if (data["battary_life"] !== undefined) {
@@ -307,7 +340,9 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
         }
 
         if (data["suction_grade"] !== undefined) {
-            let matchingFanSpeed = Object.keys(this.fanSpeeds).find(key => this.fanSpeeds[key] === data["suction_grade"]);
+            let matchingFanSpeed = Object.keys(this.fanSpeeds).find(key => {
+                return this.fanSpeeds[key] === data["suction_grade"];
+            });
 
             this.state.upsertFirstMatchingAttribute(new stateAttrs.PresetSelectionStateAttribute({
                 type: stateAttrs.PresetSelectionStateAttribute.TYPE.FAN_SPEED,
@@ -317,7 +352,9 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
         }
 
         if (data["water_grade"] !== undefined) {
-            let matchingWaterGrade = Object.keys(this.waterGrades).find(key => this.waterGrades[key] === data["water_grade"]);
+            let matchingWaterGrade = Object.keys(this.waterGrades).find(key => {
+                return this.waterGrades[key] === data["water_grade"];
+            });
 
             this.state.upsertFirstMatchingAttribute(new stateAttrs.PresetSelectionStateAttribute({
                 type: stateAttrs.PresetSelectionStateAttribute.TYPE.WATER_GRADE,
@@ -326,18 +363,12 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
             }));
         }
 
-        if (data["s_area"]) { //TODO: actually not an attribute. Use Job
-            this.state.upsertFirstMatchingAttribute(new stateAttrs.LatestCleanupStatisticsAttribute({
-                type: stateAttrs.LatestCleanupStatisticsAttribute.TYPE.AREA,
-                value: data["s_area"] * 10000 //m² to cm²
-            }));
-        }
 
-        if (data["s_time"]) {
-            this.state.upsertFirstMatchingAttribute(new stateAttrs.LatestCleanupStatisticsAttribute({
-                type: stateAttrs.LatestCleanupStatisticsAttribute.TYPE.DURATION,
-                value: data["s_time"] * 60
-            }));
+        if (data["s_area"] !== undefined) {
+            this.capabilities[capabilities.ViomiCurrentStatisticsCapability.TYPE].currentStatistics.area = parseInt(data["s_area"])* 10000;
+        }
+        if (data["s_time"] !== undefined) {
+            this.capabilities[capabilities.ViomiCurrentStatisticsCapability.TYPE].currentStatistics.time = parseInt(data["s_time"]) * 60;
         }
 
         if (data["box_type"] !== undefined) {
@@ -392,25 +423,14 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
 
         // Viomi naming is abysmal
         if (data["is_mop"] !== undefined) {
-            let operationModeValue;
+            let matchingOperationMode = Object.keys(attributes.ViomiOperationMode).find(key => {
+                return attributes.ViomiOperationMode[key] === data["is_mop"];
+            });
 
-            switch (data["is_mop"]) {
-                case attributes.ViomiOperationMode.VACUUM:
-                    operationModeValue = stateAttrs.OperationModeStateAttribute.VALUE.VACUUM;
-                    break;
-                case attributes.ViomiOperationMode.MIXED:
-                    operationModeValue = stateAttrs.OperationModeStateAttribute.VALUE.VACUUM_AND_MOP;
-                    break;
-                case attributes.ViomiOperationMode.MOP:
-                    operationModeValue = stateAttrs.OperationModeStateAttribute.VALUE.MOP;
-                    break;
-            }
-
-            if (operationModeValue) {
-                this.state.upsertFirstMatchingAttribute(new stateAttrs.OperationModeStateAttribute({
-                    value: operationModeValue
-                }));
-            }
+            this.state.upsertFirstMatchingAttribute(new stateAttrs.PresetSelectionStateAttribute({
+                type: stateAttrs.PresetSelectionStateAttribute.TYPE.OPERATION_MODE,
+                value: matchingOperationMode
+            }));
         }
 
         if (data["mop_type"] !== undefined) {
@@ -427,109 +447,113 @@ class ViomiValetudoRobot extends MiioValetudoRobot {
             }
         }
 
-        if (data["remember_map"] !== undefined) {
-            let persistentMapSetting = stateAttrs.PersistentMapSettingStateAttribute.VALUE.DISABLED;
-            if (data["remember_map"] === 1) {
-                persistentMapSetting = stateAttrs.PersistentMapSettingStateAttribute.VALUE.ENABLED;
-            }
-            this.state.upsertFirstMatchingAttribute(new stateAttrs.PersistentMapSettingStateAttribute({
-                value: persistentMapSetting
-            }));
-        }
-
-        // Adjust timezone if != UTC
-        if (data["timezone"] !== undefined && data["timezone"] !== 0) {
-            this.sendCommand("set_timezone", [0], {timeout: 12000}).then(_ => {
-                Logger.info("Viomi timezone adjusted to UTC");
-            });
+        if (data["remember_map"] !== undefined && this.hasCapability(capabilities.ViomiPersistentMapControlCapability.TYPE)) {
+            this.capabilities[capabilities.ViomiPersistentMapControlCapability.TYPE].persistentMapState = data["remember_map"] === 1;
         }
 
         this.emitStateAttributesUpdated();
     }
 
-    pollMap() {
-        // Guard against multiple concurrent polls.
-        if (this.pollingMap) {
-            return;
-        }
-
-        const now = new Date();
-        if (now.getTime() - 600 > this.lastMapPoll.getTime()) {
-            this.pollingMap = true;
-            this.lastMapPoll = now;
-
-            // Clear pending timeout, since we’re starting a new poll right now.
-            if (this.pollMapTimeout) {
-                clearTimeout(this.pollMapTimeout);
-            }
-
-            this.sendCommand("set_uploadmap", [2], {timeout: 2000}).then(() => {
-                let repollSeconds = 60;
-
-                let StatusStateAttribute = this.state.getFirstMatchingAttribute({
-                    attributeClass: stateAttrs.StatusStateAttribute.name
-                });
-
-                if (StatusStateAttribute && StatusStateAttribute.isActiveState) {
-                    repollSeconds = 2;
-                }
-
-                setTimeout(() => this.pollMap(), repollSeconds * 1000);
-            }, err => {
-                // ¯\_(ツ)_/¯
-            }).finally(() => {
-                this.pollingMap = false;
-            });
-        }
-
-        this.pollMapTimeout = setTimeout(() => this.pollMap(), 5 * 60 * 1000); // 5 minutes
+    async executeMapPoll() {
+        return this.sendCommand("set_uploadmap", [2], {timeout: 2000, interface: "cloud"});
     }
 
-
     preprocessMap(data) {
-        return new Promise((resolve, reject) => {
-            zlib.inflate(data, (err, result) => err ? reject(err) : resolve(result));
-        });
+        return ThreeIRobotixMapParser.PREPROCESS(data);
     }
 
     async parseMap(data) {
         try {
             // noinspection UnnecessaryLocalVariableJS
-            const map = new ViomiMapParser(data).parse();
+            const map = ThreeIRobotixMapParser.PARSE(data);
 
-            this.state.map = map;
+            if (map !== null) {
+                if (map.metaData.vendorMapId > 0) { // Regular map
+                    this.ephemeralState.vendorMapId = map.metaData.vendorMapId;
 
-            if (this.debugConfig.enableDebugCapability) {
-                this.lastRawMap = data;
+                    this.state.map = map;
+
+                    this.emitMapUpdated();
+                } else { // Temporary map
+                    if (this.ephemeralState.vendorMapId === 0) {
+                        this.state.map = map; // There is no previous full data so this is all we have
+
+                        this.emitMapUpdated();
+                    } // else: ignore since we already have a better map
+                }
             }
-
-            this.emitMapUpdated();
-            return this.state.map; //TODO
         } catch (e) {
-            // save map data for later debugging
-            if (this.debugConfig.enableDebugCapability) {
-                // @ts-ignore
-                this.lastFailedRawMap = data;
-                this.lastMapError = e.toString();
-            }
-
-            let i = 0;
-            let filename = "";
-            do {
-                filename = "/tmp/mapdata" + i++;
-            } while (fs.existsSync(filename));
-
-            fs.writeFile(filename, zlib.deflateSync(data), (err) => {
-                Logger.warn("Error while saving unparsable map", err);
-            });
-            Logger.error("Error parsing map. Dump saved in", filename);
-
-            throw e;
+            Logger.error("Error parsing map.", e);
         }
+
+        return this.state.map;
+    }
+
+    clearValetudoMap() {
+        this.ephemeralState.vendorMapId = 0;
+
+        super.clearValetudoMap();
     }
 
     getManufacturer() {
-        return "Viomi Technology Co., Ltd";
+        return "Viomi";
+    }
+
+    getModelDetails() {
+        return Object.assign(
+            {},
+            super.getModelDetails(),
+            {
+                supportedAttachments: [
+                    stateAttrs.AttachmentStateAttribute.TYPE.DUSTBIN,
+                    stateAttrs.AttachmentStateAttribute.TYPE.WATERTANK,
+                    stateAttrs.AttachmentStateAttribute.TYPE.MOP,
+                ]
+            }
+        );
+    }
+
+    /**
+     * @private
+     * @returns {string | null}
+     */
+    getFirmwareVersion() {
+        try {
+            const os_release = fs.readFileSync("/etc/YMsave01/os-release").toString();
+            const parsedFile = /^VIOMI_VERSION=(?<version>[\d._]*)$/m.exec(os_release);
+
+            if (parsedFile !== null && parsedFile.groups && parsedFile.groups.version) {
+                return parsedFile.groups.version.split("_")?.[1];
+            } else {
+                return null;
+            }
+        } catch (e) {
+            Logger.warn("Unable to determine the Firmware Version", e);
+
+            return null;
+        }
+    }
+
+    /**
+     * @return {object}
+     */
+    getProperties() {
+        const superProps = super.getProperties();
+        const ourProps = {};
+
+        if (this.config.get("embedded") === true) {
+            const firmwareVersion = this.getFirmwareVersion();
+
+            if (firmwareVersion) {
+                ourProps[ViomiValetudoRobot.WELL_KNOWN_PROPERTIES.FIRMWARE_VERSION] = firmwareVersion;
+            }
+        }
+
+        return Object.assign(
+            {},
+            superProps,
+            ourProps
+        );
     }
 }
 
@@ -551,8 +575,7 @@ const STATE_PROPERTIES = [
     "remember_map",
     "has_map",
     "is_mop",
-    "has_newmap",
-    "timezone"
+    "has_newmap"
 ];
 
 const STATUS_MAP = Object.freeze({

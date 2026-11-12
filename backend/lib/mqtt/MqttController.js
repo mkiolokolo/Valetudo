@@ -1,19 +1,19 @@
 const asyncMqtt = require("async-mqtt");
-const crypto = require("crypto");
 const HassAnchor = require("./homeassistant/HassAnchor");
+const HassAnchorProvider = require("./homeassistant/HassAnchorProvider");
 const HassController = require("./homeassistant/HassController");
 const HomieCommonAttributes = require("./homie/HomieCommonAttributes");
+const KeyValueDeduplicationCache = require("../utils/KeyValueDeduplicationCache");
 const Logger = require("../Logger");
 const mqtt = require("mqtt");
 const MqttCommonAttributes = require("./MqttCommonAttributes");
 const RobotMqttHandle = require("./handles/RobotMqttHandle");
 const Semaphore = require("semaphore");
+const Tools = require("../utils/Tools");
+const { CAPABILITY_TYPE_TO_HANDLE_MAPPING } = require("./handles/HandleMappings");
 
 /**
  * @typedef {object} DeconfigureOptions
- * @property {boolean} [cleanValues] Default true
- * @property {boolean} [cleanHomie] Default true
- * @property {boolean} [cleanHass] Default true
  * @property {boolean} [unsubscribe] Default true
  */
 
@@ -22,16 +22,24 @@ class MqttController {
      * @param {object} options
      * @param {import("../core/ValetudoRobot")} options.robot
      * @param {import("../Configuration")} options.config
+     * @param {import("../ValetudoEventStore")} options.valetudoEventStore
+     * @param {import("../utils/ValetudoHelper")} options.valetudoHelper
      */
     constructor(options) {
         this.config = options.config;
         this.robot = options.robot;
+        this.valetudoEventStore = options.valetudoEventStore;
+        this.valetudoHelper = options.valetudoHelper;
 
-        this.semaphores = {
-            reconfigure: Semaphore(1)
+        this.mutexes = {
+            reconfigure: Semaphore(1),
+            configUpdate: Semaphore(1)
         };
 
+        this.messageDeduplicationCache = new KeyValueDeduplicationCache({});
+
         this.client = null;
+        this.refreshInterval = 30 * 1000;
         this.refreshIntervalID = null;
 
         /** @type {Array<import("./handles/NodeMqttHandle")>} */
@@ -39,10 +47,39 @@ class MqttController {
 
         this.subscriptions = {};
 
-        this.state = HomieCommonAttributes.STATE.INIT;
+        this.state = HomieCommonAttributes.STATE.DISCONNECTED;
+        this.stats = {
+            messages: {
+                count: {
+                    received: 0,
+                    sent: 0
+                },
+                bytes: {
+                    received: 0,
+                    sent: 0
+                }
 
-        /** @public */
-        this.homieAddICBINVMapProperty = false;
+            },
+            connection: {
+                connects: 0,
+                disconnects: 0,
+                reconnects: 0,
+                errors: 0
+            }
+        };
+
+        this.configDefaults = {
+            identity: {
+                identifier: Tools.GET_HUMAN_READABLE_SYSTEM_ID()
+            },
+            customizations: {
+                topicPrefix: "valetudo"
+            }
+        };
+
+        this.mqttClientCloseEventHandler = async () => {
+            //intentionally empty default
+        };
 
         this.loadConfig();
 
@@ -50,109 +87,129 @@ class MqttController {
             this.onMapUpdated();
         });
 
+        this.valetudoEventStore.onEventsUpdated(() => {
+            this.onValetudoEventsUpdated();
+        });
+
         /** @type {import("./handles/RobotMqttHandle")|null} */
         this.robotHandle = null;
         /** @type {HassController} */
         this.hassController = null;
+        this.hassAnchorProvider = new HassAnchorProvider(); //Always required
 
-        if (this.enabled) {
-            if (this.hassEnabled) {
-                this.hassController = new HassController({
-                    controller: this,
-                    robot: this.robot,
-                    config: this.config
-                });
-            }
-
-            this.robotHandle = new RobotMqttHandle({
-                robot: options.robot,
+        if (this.currentConfig.enabled) {
+            this.hassController = new HassController({
                 controller: this,
-                baseTopic: this.topicPrefix,
-                topicName: this.identifier,
-                friendlyName: this.friendlyName
+                robot: this.robot,
+                config: this.config,
+                friendlyName: this.valetudoHelper.getFriendlyName()
             });
 
-            this.connect().then();
+            this.robotHandle = new RobotMqttHandle({
+                robot: this.robot,
+                valetudoEventStore: this.valetudoEventStore,
+                controller: this,
+                baseTopic: this.currentConfig.customizations.topicPrefix,
+                topicName: this.currentConfig.identity.identifier,
+                friendlyName: this.valetudoHelper.getFriendlyName(),
+                optionalExposedCapabilities: this.currentConfig.optionalExposedCapabilities
+            });
+
+            this.connect().catch(err => {
+                Logger.error("Error during MQTT connect", err);
+            });
         }
 
-        this.config.onUpdate(async (key) => {
+        this.config.onUpdate((key) => {
             if (key === "mqtt") {
-                if (this.enabled) {
-                    const newConfig = this.config.get("mqtt");
-                    const deconfOptions = {
-                        cleanValues: newConfig.enabled ? true : newConfig.cleanTopicsOnShutdown,
-                        cleanHomie: newConfig.enabled ? true : newConfig.homie.cleanAttributesOnShutdown,
-                        cleanHass: newConfig.enabled ? true : newConfig.homeassistant.cleanAutoconfOnShutdown,
-                        unsubscribe: newConfig.enabled ? true : newConfig.clean
-                    };
-                    await this.reconfigure(async () => {
-                        // If we're shutting down indefinitely, respect user settings
-                        // If we're just reconfiguring, take everything down with state == init so consumers know what we're up to
-                        await this.robotHandle.deconfigure(deconfOptions);
-                        if (this.hassEnabled) {
-                            await this.hassController.deconfigure(deconfOptions);
-                        }
-
-                    }, {targetState: newConfig.enabled ? HomieCommonAttributes.STATE.INIT : HomieCommonAttributes.STATE.DISCONNECTED});
-
-                    if (!newConfig.enabled) {
-                        try {
-                            await this.setState(HomieCommonAttributes.STATE.LOST);
-                            await this.setState(HomieCommonAttributes.STATE.DISCONNECTED);
-                        } catch (e) {
-                            Logger.warn("Failed to set MQTT state", e);
-                        }
-                    }
-
-                    await this.disconnect();
-                }
-
-                this.loadConfig();
-
-                if (this.enabled) {
-                    if (this.hassEnabled) {
-                        this.hassController = new HassController({
-                            controller: this,
-                            robot: this.robot,
-                            config: this.config
-                        });
-                    } else {
-                        this.hassController = null;
-                    }
-
-                    this.robotHandle = new RobotMqttHandle({
-                        robot: options.robot,
-                        controller: this,
-                        baseTopic: this.topicPrefix,
-                        topicName: this.identifier,
-                        friendlyName: this.friendlyName
-                    });
-
-                    await this.connect();
-                } else {
-                    this.robotHandle = null;
-                    this.hassController = null;
-                }
+                this.handleConfigUpdated().catch((err) => {
+                    Logger.warn("Error while reconfiguring MQTT after configuration change", err);
+                });
             }
+        });
+
+        this.valetudoHelper.onFriendlyNameChanged(() => {
+            this.handleConfigUpdated().catch((err) => {
+                Logger.warn("Error while reconfiguring MQTT after friendly name change", err);
+            });
         });
     }
 
     /**
-     * Generates a unique client ID. It tries to hash some unique device identifier if possible to have a static ID,
-     * falling back to a randomly generated one.
-     *
      * @private
-     * @return {string}
+     * @return {Promise<void>}
      */
-    genClientId() {
-        // @ts-ignore - deviceId only exists in MiioValetudoRobot
-        const deviceId = this.robot.deviceId;
-        if (deviceId === undefined) {
-            return "valetudo_" + Math.random().toString(16).substr(2, 8);
+    async handleConfigUpdated() {
+        await new Promise((resolve) => {
+            this.mutexes.configUpdate.take(() => {
+                resolve();
+            });
+        });
+        await this.shutdown();
+
+        this.loadConfig();
+
+        this.hassAnchorProvider = new HassAnchorProvider(); // Always create a new one to reset anchors + subscriptions
+
+        if (this.currentConfig.enabled) {
+            this.hassController = new HassController({
+                controller: this,
+                robot: this.robot,
+                config: this.config,
+                friendlyName: this.valetudoHelper.getFriendlyName()
+            });
+
+            this.robotHandle = new RobotMqttHandle({
+                robot: this.robot,
+                valetudoEventStore: this.valetudoEventStore,
+                controller: this,
+                baseTopic: this.currentConfig.customizations.topicPrefix,
+                topicName: this.currentConfig.identity.identifier,
+                friendlyName: this.valetudoHelper.getFriendlyName(),
+                optionalExposedCapabilities: this.currentConfig.optionalExposedCapabilities
+            });
+
+            await this.connect();
+        } else {
+            this.robotHandle = null;
+            this.hassController = null;
         }
-        const sha256 = crypto.createHash("sha256");
-        sha256.update(deviceId.toString());
-        return "valetudo_" + sha256.digest("hex").substr(0, 8);
+
+        this.mutexes.configUpdate.leave();
+    }
+
+    /**
+     * @public
+     * @return {{stats: ({messages: {bytes: {received: number, sent: number}, count: {received: number, sent: number}}, connection: {reconnects: number, connects: number, disconnects: number, errors: number}}), state: string}}
+     */
+    getStatus() {
+        return {
+            state: this.state,
+            stats: this.stats
+        };
+    }
+
+    /**
+     * @public
+     * @return {{identity: {identifier: string}, customizations: {topicPrefix: string}}}
+     */
+    getConfigDefaults() {
+        return this.configDefaults;
+    }
+
+    getOptionalExposableCapabilities() {
+        return Object.keys(this.robot.capabilities).map((type) => {
+            const handle = CAPABILITY_TYPE_TO_HANDLE_MAPPING[type];
+
+            if (handle && handle.OPTIONAL === true) {
+                return type;
+            } else {
+                return undefined;
+            }
+
+        }).filter(e => {
+            return e !== undefined;
+        });
     }
 
     /**
@@ -161,50 +218,47 @@ class MqttController {
     loadConfig() {
         const mqttConfig = this.config.get("mqtt");
 
-        this.enabled = mqttConfig.enabled;
-        this.server = mqttConfig.server;
-        this.clientId = mqttConfig.clientId ?? this.genClientId();
-        this.clean = mqttConfig.clean;
-        this.cleanTopics = mqttConfig.cleanTopicsOnShutdown;  // TODO for hass
-        this.topicPrefix = mqttConfig.topicPrefix;
-        this.port = mqttConfig.port ?? 1883;
-        this.identifier = mqttConfig.identifier;
-        this.friendlyName = mqttConfig.friendlyName;
-        this.username = mqttConfig.username;
-        this.password = mqttConfig.password;
-        this.usetls = mqttConfig.usetls;
-        this.ca = mqttConfig.ca ?? "";
-        this.clientCert = mqttConfig.clientCert ?? "";
-        this.clientKey = mqttConfig.clientKey ?? "";
-        this.qos = mqttConfig.qos ?? 0;
-        this.refreshInterval = mqttConfig.refreshInterval ?? 30;
+        /** @type {InternalMQTTConfiguration} **/
+        this.currentConfig = structuredClone({
+            clientId: "valetudo_" + Tools.GET_HUMAN_READABLE_SYSTEM_ID(),
+            qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE,
 
-        this.stateTopic = this.topicPrefix + "/" + this.identifier + "/$state";
+            enabled: mqttConfig.enabled,
+            connection: mqttConfig.connection,
+            identity: mqttConfig.identity,
+            customizations: mqttConfig.customizations,
+            optionalExposedCapabilities: mqttConfig.optionalExposedCapabilities
+        });
 
-        this.homieEnabled = mqttConfig.homie.enabled;
-        this.homieCleanAttributes = mqttConfig.homie.cleanAttributesOnShutdown ?? false;
-        this.homieAddICBINVMapProperty = mqttConfig.homie.addICBINVMapProperty ?? false;
+        if (!this.currentConfig.identity.identifier) {
+            this.currentConfig.identity.identifier = this.configDefaults.identity.identifier;
+        }
 
-        this.attributesUpdateInterval = mqttConfig.attributesUpdateInterval ?? 60000;
-        this.provideMapData = mqttConfig.provideMapData !== undefined ? mqttConfig.provideMapData : true;
+        if (!this.currentConfig.customizations.topicPrefix) {
+            this.currentConfig.customizations.topicPrefix = this.configDefaults.customizations.topicPrefix;
+        }
 
-        this.hassEnabled = mqttConfig.homeassistant.enabled;
-        this.hassCleanAutoconf = mqttConfig.homeassistant.cleanAutoconfOnShutdown ?? false;
+        this.currentConfig.stateTopic = this.currentConfig.customizations.topicPrefix + "/" + this.currentConfig.identity.identifier + "/$state";
     }
 
     /**
      * @private
      */
     startAutorefreshService() {
-        if (this.refreshIntervalID === null && this.refreshInterval > 0) {
+        if (this.refreshIntervalID === null) {
             this.refreshIntervalID = setInterval(() => {
                 if (!this.robotHandle) {
                     return;
                 }
+
+                if (this.state !== HomieCommonAttributes.STATE.READY) {
+                    return;
+                }
+
                 this.robotHandle.refresh().catch((reason => {
                     Logger.error("Failed auto refresh:", reason);
                 }));
-            }, this.refreshInterval * 1000);
+            }, this.refreshInterval);
         }
     }
 
@@ -224,25 +278,33 @@ class MqttController {
      */
     getMqttOptions() {
         const options = {
-            clientId: this.clientId,
-            clean: this.clean
+            clientId: this.currentConfig.clientId,
+            reconnectPeriod: 3000,
+            // Quoting the MQTT.js docs: set to false to receive QoS 1 and 2 messages while offline
+            // Useful to make sure that commands arrive on flaky wifi connections
+            clean: false
         };
 
-        if (this.username) {
-            options.username = this.username;
+        if (this.currentConfig.connection.tls.enabled) {
+            if (this.currentConfig.connection.tls.ca) {
+                options.ca = this.currentConfig.connection.tls.ca;
+            }
+
+            if (this.currentConfig.connection.tls.ignoreCertificateErrors === true) {
+                options.rejectUnauthorized = false;
+            }
         }
-        if (this.password) {
-            options.password = this.password;
+
+        if (this.currentConfig.connection.authentication.credentials.enabled) {
+            options.username = this.currentConfig.connection.authentication.credentials.username;
+            options.password = this.currentConfig.connection.authentication.credentials.password ?? undefined;
         }
-        if (this.ca) {
-            options.ca = this.ca;
+
+        if (this.currentConfig.connection.authentication.clientCertificate.enabled) {
+            options.cert = this.currentConfig.connection.authentication.clientCertificate.certificate;
+            options.key = this.currentConfig.connection.authentication.clientCertificate.key;
         }
-        if (this.clientCert) {
-            options.cert = this.clientCert;
-        }
-        if (this.clientKey) {
-            options.key = this.clientKey;
-        }
+
         return options;
     }
 
@@ -254,48 +316,75 @@ class MqttController {
             let options = this.getMqttOptions();
 
             options.will = {
-                topic: this.stateTopic,
+                topic: this.currentConfig.stateTopic,
                 payload: HomieCommonAttributes.STATE.LOST,
                 qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE,
                 retain: true,
             };
 
+            const protocol = this.currentConfig.connection.tls.enabled ? "mqtts://" : "mqtt://";
+
             this.client = mqtt.connect(
-                (this.usetls ? "mqtts://" : "mqtt://") + this.server + ":" + this.port,
+                `${protocol}${this.currentConfig.connection.host}:${this.currentConfig.connection.port}`,
                 options
             );
+
             // AsyncClient is just a wrapper and it is way more convenient in some contexts
+            // @ts-ignore async-mqtt does not specify mqtt as a peer dependency
             this.asyncClient = new asyncMqtt.AsyncClient(this.client);
 
             this.client.on("connect", () => {
                 Logger.info("Connected successfully to MQTT broker");
-                this.reconfigure(async () => {
-                    await HassAnchor.getTopicReference(HassAnchor.REFERENCE.AVAILABILITY).post(this.stateTopic);
 
-                    await this.robotHandle.configure();
-                    if (this.hassEnabled) {
-                        await this.hassController.configure();
+                this.stats.connection.connects++;
+                this.messageDeduplicationCache.clear();
+
+                this.reconfigure(async () => {
+                    await this.hassAnchorProvider.getTopicReference(
+                        HassAnchor.REFERENCE.AVAILABILITY
+                    ).post(this.currentConfig.stateTopic);
+
+                    try {
+                        await this.robotHandle.configure();
+                    } catch (e) {
+                        Logger.error("Error while configuring robotHandle", e);
                     }
+
+                    await this.hassController.configure();
+
                     this.startAutorefreshService();
+
                     Logger.info("MQTT configured");
                 }).then(() => {
                     this.setState(HomieCommonAttributes.STATE.READY).then(() => {
-                        this.robotHandle.refresh().then();
+                        this.onValetudoEventsUpdated(); // Publish the initial state
+
+                        this.robotHandle.refresh().catch(err => {
+                            Logger.error("Error during MQTT handle refresh", err);
+                        });
+                    }).catch(e => {
+                        Logger.error("Error on MQTT reconfigure state change", e);
                     });
+                }).catch(e => {
+                    Logger.error("Error on MQTT reconfigure", e);
                 });
             });
 
             this.client.on("message", (topic, message, packet) => {
+                this.stats.messages.count.received++;
+                this.stats.messages.bytes.received += packet.length;
+
                 if (!Object.prototype.hasOwnProperty.call(this.subscriptions, topic)) {
                     return;
                 }
+
                 const msg = message.toString();
 
                 //@ts-ignore
-                if (packet?.retain === true) {
+                if (packet.retain === true) {
                     Logger.warn(
                         "Received a retained MQTT message. Most certainly you or the home automation software integration " +
-                        "you are using are sending the MQTT command incorrectly. Please remove the \"retained\" flag to fix this issue. Discarding.",
+                        "you are using is sending the MQTT command incorrectly. Please remove the \"retained\" flag to fix this issue. Discarding message.",
                         {
                             topic: topic,
                             message: msg
@@ -305,26 +394,53 @@ class MqttController {
                     return;
                 }
 
-                this.subscriptions[topic](msg).then();
+                this.subscriptions[topic](msg).catch(err => {
+                    Logger.error("Error during handling of incoming MQTT message", err);
+                });
             });
 
             this.client.on("error", (e) => {
+                this.stats.connection.errors++;
+
                 if (e && e.message === "Not supported") {
-                    Logger.info("Connected to non standard compliant MQTT Broker.");
+                    Logger.info("Connected to non-standard-compliant MQTT Broker.");
                 } else {
                     Logger.error("MQTT error:", e.toString());
-                    if (this.isInitialized()) {
-                        (async () => {
-                            // Do not use .reconfigure() since it will try to publish to MQTT
-                            this.state = HomieCommonAttributes.STATE.ALERT;
-                            await this.shutdown();
-                            await this.connect();
-                        })().then();
+
+                    if (this.isInitialized) {
+                        this.setState(HomieCommonAttributes.STATE.ALERT).catch(e => {
+                            Logger.error("Error while setting state due to mqtt client error", e);
+                        });
                     }
                 }
-                // TODO: reconnection
             });
+
+            this.client.on("reconnect", () => {
+                this.stats.connection.reconnects++;
+                Logger.info("Attempting to reconnect to MQTT broker");
+            });
+
+            this.mqttClientCloseEventHandler = async () => {
+                await this.handleUncleanDisconnect();
+            };
+
+            this.client.on("close", this.mqttClientCloseEventHandler);
         }
+    }
+
+    /**
+     * @private
+     * @return {Promise<void>}
+     */
+    async handleUncleanDisconnect() {
+        if (this.state === HomieCommonAttributes.STATE.READY) {
+            Logger.info("Connection to MQTT broker closed");
+
+            this.messageDeduplicationCache.clear();
+        }
+
+        this.stopAutorefreshService();
+        await this.setState(HomieCommonAttributes.STATE.LOST);
     }
 
     /**
@@ -336,7 +452,8 @@ class MqttController {
             return;
         }
 
-        Logger.debug("Disconnecting MQTT Client...");
+        Logger.info("Disconnecting from the MQTT Broker...");
+        this.client.removeListener("close", this.mqttClientCloseEventHandler);
 
         const closePromise = new Promise(((resolve, reject) => {
             this.client.on("close", (err) => {
@@ -347,16 +464,40 @@ class MqttController {
             });
         }));
 
-        await this.asyncClient.end();
-        await closePromise;
+        let forceDisconnectTimeout;
 
-        if (!this.client.disconnected) {
-            throw new Error("MQTT.js is pretending to be disconnected");
+        await Promise.race([
+            Promise.all([
+                this.asyncClient.end(),
+                closePromise
+            ]),
+            new Promise((resolve) => {
+                forceDisconnectTimeout = setTimeout(() => {
+                    if (this.client !== null && typeof this.client.end === "function") {
+                        this.client.end(true);
+
+                        Logger.warn("Forced MQTT disconnect");
+                    }
+
+                    resolve();
+                }, 1500);
+            })
+        ]);
+        clearTimeout(forceDisconnectTimeout);
+
+
+        if (this.client && !this.client.disconnected) {
+            Logger.warn("MQTT.js is pretending to be disconnected");
+            this.client.end(true);
         }
 
         this.client = null;
         this.asyncClient = null;
-        Logger.debug("Disconnecting the MQTT Client done");
+
+        this.messageDeduplicationCache.clear();
+
+        Logger.info("Successfully disconnected from the MQTT Broker");
+        this.stats.connection.disconnects++;
     }
 
     /**
@@ -368,30 +509,30 @@ class MqttController {
         if (!this.client) {
             return;
         }
+
+        //disable automatic reconnects
+        this.client.options.reconnectPeriod = 0;
+
         this.stopAutorefreshService();
 
         await this.reconfigure(async () => {
             const deconfigOpts = {
-                cleanValues: this.cleanTopics,
-                cleanHomie: this.homieCleanAttributes,
-                cleanHass: this.hassCleanAutoconf,
-                unsubscribe: this.clean
+                unsubscribe: true
             };
+
             await this.robotHandle.deconfigure(deconfigOpts);
-            if (this.hassEnabled) {
-                await this.hassController.deconfigure(deconfigOpts);
-            }
+
+            await this.hassController.deconfigure(deconfigOpts);
+
         }, {targetState: HomieCommonAttributes.STATE.DISCONNECTED});
 
-        if (this.hassEnabled) {
-            // Workaround to allow sharing one single LWT with both Homie consumers and HAss.
-            // "lost" for Homie means that device disconnected uncleanly, however we also set it as hass's unavailable
-            // payload.
-            // Switching to "lost" temporarily shouldn't bother most Homie consumers, but it will ensure hass also knows
-            // what's up.
-            await this.setState(HomieCommonAttributes.STATE.LOST);
-            await this.setState(HomieCommonAttributes.STATE.DISCONNECTED);
-        }
+        // Workaround to allow sharing one single LWT with both Homie consumers and HAss.
+        // "lost" for Homie means that device disconnected uncleanly, however we also set it as hass's unavailable
+        // payload.
+        // Switching to "lost" temporarily shouldn't bother most Homie consumers, but it will ensure hass also knows
+        // what's up.
+        await this.setState(HomieCommonAttributes.STATE.LOST);
+        await this.setState(HomieCommonAttributes.STATE.DISCONNECTED);
 
         await this.disconnect();
     }
@@ -403,8 +544,18 @@ class MqttController {
      * @public
      * @return {boolean}
      */
-    isInitialized() {
+    get isInitialized() {
         return this.state === HomieCommonAttributes.STATE.READY;
+    }
+
+    /**
+     * Whether we're connected to the broker
+     *
+     * @public
+     * @return {boolean}
+     */
+    get isConnected() {
+        return this.client && this.client.connected === true && this.client.disconnecting !== true;
     }
 
     /**
@@ -415,19 +566,42 @@ class MqttController {
      * @return {Promise<void>}
      */
     async setState(state) {
-        await this.asyncClient.publish(this.stateTopic, state, {
-            // @ts-ignore
-            qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE,
-            retain: true
+        if (state === this.state) { // No point in setting the same state again
+            return;
+        }
+
+        if (this.isConnected) {
+            await this.publish(this.currentConfig.stateTopic, state, {
+                // @ts-ignore
+                qos: MqttCommonAttributes.QOS.AT_MOST_ONCE, // Anything other than QoS 0 can potentially block for a long time
+                retain: true
+            });
+        }
+
+        Logger.trace("MQTT State change", {
+            prev: this.state,
+            new: state
         });
+
         this.state = state;
     }
 
     onMapUpdated() {
-        if (this.enabled && this.isInitialized() && this.robotHandle !== null && this.provideMapData) {
+        if (this.currentConfig.enabled && this.isInitialized && this.robotHandle !== null) {
             const mapHandle = this.robotHandle.getMapHandle();
+
             if (mapHandle !== null) {
                 mapHandle.onMapUpdated();
+            }
+        }
+    }
+
+    onValetudoEventsUpdated() {
+        if (this.currentConfig.enabled && this.isInitialized && this.robotHandle !== null) {
+            const valetudoEventsHandle = this.robotHandle.getValetudoEventsHandle();
+
+            if (valetudoEventsHandle !== null) {
+                valetudoEventsHandle.onValetudoEventsUpdated();
             }
         }
     }
@@ -448,46 +622,48 @@ class MqttController {
      * @param {string} [options.errorState]
      * @return {Promise<void>}
      */
-    reconfigure(cb, options) {
-        return new Promise((resolve, reject) => {
-            this.semaphores.reconfigure.take(async () => {
-                const reconfOptions = {
-                    reconfigState: HomieCommonAttributes.STATE.INIT,
-                    targetState: HomieCommonAttributes.STATE.READY,
-                    errorState: HomieCommonAttributes.STATE.ALERT
-                };
-                if (options !== undefined) {
-                    Object.assign(reconfOptions, options);
-                }
-
-                // TODO: Is this still required?
-
-                // Nested reconfiguration, may occur i.e. if consumables are already available during first configuration.
-                // In this case, just force the target state to be init as well.
-                // on("connect") will handle the special case where this is triggered on first connection.
-                if (this.state === reconfOptions.reconfigState && this.state === HomieCommonAttributes.STATE.INIT &&
-                    reconfOptions.targetState === HomieCommonAttributes.STATE.READY) {
-
-                    reconfOptions.targetState = HomieCommonAttributes.STATE.INIT;
-                }
-
-                try {
-                    await this.setState(reconfOptions.reconfigState);
-                    await cb();
-                    await this.setState(reconfOptions.targetState);
-
-                    this.semaphores.reconfigure.leave();
-                    resolve();
-                } catch (err) {
-                    Logger.error("MQTT reconfiguration error", err);
-                    await this.setState(reconfOptions.errorState);
-
-                    this.semaphores.reconfigure.leave();
-
-                    reject(err);
-                }
+    async reconfigure(cb, options) {
+        await new Promise((resolve) => {
+            this.mutexes.reconfigure.take(() => {
+                resolve();
             });
         });
+
+        const reconfOptions = {
+            reconfigState: HomieCommonAttributes.STATE.INIT,
+            targetState: HomieCommonAttributes.STATE.READY,
+            errorState: HomieCommonAttributes.STATE.ALERT
+        };
+
+        if (options !== undefined) {
+            Object.assign(reconfOptions, options);
+        }
+
+        const previousState = this.state;
+
+        try {
+            await this.setState(reconfOptions.reconfigState);
+            await cb();
+
+            // Since the ready state is used by the handles to determine whether they should publish stuff,
+            // we must never exit reconfigure in the READY state if we are in fact not READY
+            if (reconfOptions.targetState === HomieCommonAttributes.STATE.READY && !this.isConnected) {
+                Logger.debug(`Overriding reconfigure target state '${reconfOptions.targetState}' with '${previousState}' since we're not connected.`);
+
+                reconfOptions.targetState = previousState;
+            }
+
+            await this.setState(reconfOptions.targetState);
+
+            this.mutexes.reconfigure.leave();
+        } catch (err) {
+            Logger.error("MQTT reconfiguration error", err);
+            await this.setState(reconfOptions.errorState);
+
+            this.mutexes.reconfigure.leave();
+
+            throw err;
+        }
     }
 
     /**
@@ -501,7 +677,32 @@ class MqttController {
         if (Object.keys(topics).length === 0) {
             return;
         }
-        await this.asyncClient.subscribe(Object.keys(topics), {qos: this.qos});
+
+
+        try {
+            for (const topic of Object.keys(topics)) {
+                // @ts-ignore
+                await this.asyncClient.subscribe({
+                    [topic]: {
+                        qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE
+                    },
+                    /*
+                        The resubscribe option is undocumented and thus may break in the future (2022-08-21)
+                        It works around this bug(?): https://github.com/mqttjs/MQTT.js/issues/895
+
+                        According to https://github.com/mqttjs/MQTT.js/issues/749#issuecomment-1002481265, using MQTTv5 also fixes the issue
+                        We should revisit this when MQTTv5 support is stable and well-established
+                     */
+                    resubscribe: true
+                });
+            }
+        } catch (e) {
+            if (e.message !== "client disconnecting" && e.message !== "connection closed") {
+                throw e;
+            }
+        }
+
+
         Object.assign(this.subscriptions, topics);
     }
 
@@ -512,12 +713,19 @@ class MqttController {
      * @return {Promise<void>}
      */
     async unsubscribe(handle) {
-        const topics = handle.getInterestingTopics();
-        if (Object.keys(topics).length === 0) {
+        if (Object.keys(this.subscriptions).length === 0) {
             return;
         }
-        await this.asyncClient.unsubscribe(Object.keys(topics));
-        for (const topic of Object.keys(topics)) {
+
+        try {
+            await this.asyncClient.unsubscribe(Object.keys(this.subscriptions));
+        } catch (e) {
+            if (e.message !== "client disconnecting" && e.message !== "Connection closed") {
+                throw e;
+            }
+        }
+
+        for (const topic of Object.keys(this.subscriptions)) {
             delete this.subscriptions[topic];
         }
     }
@@ -529,40 +737,21 @@ class MqttController {
      * @return {Promise<void>}
      */
     async refresh(handle) {
-        if (!this.isInitialized()) {
+        if (!this.isInitialized) {
             return;
         }
+
         const value = await handle.getHomie();
+
         if (value !== null) {
             try {
-                await this.asyncClient.publish(handle.getBaseTopic(), value, {qos: this.qos, retain: handle.retained});
-            } catch (e) {
-                Logger.warn("MQTT publication failed, topic " + handle.getBaseTopic(), e);
-            }
-        }
-    }
-
-    /**
-     * Mark a handle's topic as removed. This can only be used while in reconfiguration mode.
-     *
-     * @param {import("./handles/MqttHandle")} handle
-     * @return {Promise<void>}
-     */
-    async dropHandleValue(handle) {
-        if (this.isInitialized()) {
-            throw new Error("Handles may be dropped only while the MQTT controller is not initialized");
-        }
-        if (!this.clean) {
-            return; // Users may want the values to stick around
-        }
-        try {
-            await this.asyncClient.publish(handle.getBaseTopic(), "", {
                 // @ts-ignore
-                qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE,
-                retain: false
-            });
-        } catch (e) {
-            Logger.warn("Failed to drop handle value, topic " + handle.getBaseTopic(), e);
+                await this.publish(handle.getBaseTopic(), value, {qos: handle.getQoS(), retain: handle.retained});
+            } catch (e) {
+                if (e.message !== "client disconnecting" && e.message !== "connection closed") {
+                    Logger.warn("MQTT publication failed, topic " + handle.getBaseTopic(), e);
+                }
+            }
         }
     }
 
@@ -573,56 +762,25 @@ class MqttController {
      * @return {Promise<void>}
      */
     async publishHomieAttributes(handle) {
-        if (!this.homieEnabled) {
-            return;
-        }
-        if (this.isInitialized()) {
+        if (this.isInitialized) {
             throw new Error("Homie attributes may be altered only while the MQTT controller is not initialized");
         }
+
         const attrs = handle.getHomieAttributes();
         const baseTopic = handle.getBaseTopic();
 
         for (const [topic, value] of Object.entries(attrs)) {
             try {
-                await this.asyncClient.publish(baseTopic + "/" + topic, value, {
+                await this.publish(baseTopic + "/" + topic, value, {
                     // @ts-ignore
                     qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE,
                     retain: true
                 });
             } catch (err) {
-                Logger.warn("Failed to publish Homie attributes for handle " + handle.getBaseTopic() + ". " +
-                    "Maybe you forgot to marshal some value?", err);
-                throw err;
-            }
-        }
-    }
-
-    /**
-     * Remove all Homie attributes for an handle. This can only be used while in reconfiguration mode.
-     *
-     * @param {import("./handles/MqttHandle")} handle
-     * @return {Promise<void>}
-     */
-    async dropHomieAttributes(handle) {
-        if (!this.homieEnabled) {
-            return;
-        }
-        if (this.isInitialized()) {
-            throw new Error("Homie attributes may be altered only while the MQTT controller is not initialized");
-        }
-        const attrs = handle.getHomieAttributes();
-        const baseTopic = handle.getBaseTopic();
-
-        for (const topic of Object.keys(attrs)) {
-            try {
-                // @ts-ignore
-                await this.asyncClient.publish(baseTopic + "/" + topic, "", {
-                    // @ts-ignore
-                    qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE,
-                    retain: false
-                });
-            } catch (e) {
-                Logger.warn("Failed to drop Homie attribute, topic " + topic, e);
+                if (err.message !== "client disconnecting" && err.message !== "connection closed") {
+                    Logger.warn(`Failed to publish Homie attributes for handle ${handle.getBaseTopic()}. Maybe you forgot to marshal some value?`, err);
+                    throw err;
+                }
             }
         }
     }
@@ -634,15 +792,13 @@ class MqttController {
      */
     /**
      * This is a fancy wrapper inspired by Python's "with" statement. It should be called by Handles that intend to
-     * register their own Hass components. The callback will only be called if Hass is actually enabled.
+     * register their own Hass components.
      *
      * @param {withHassAsyncCb} callback
      * @return {Promise<void>}
      */
     async withHassAsync(callback) {
-        if (this.hassEnabled) {
-            await callback(this.hassController);
-        }
+        await callback(this.hassController);
     }
 
 
@@ -653,15 +809,13 @@ class MqttController {
      */
     /**
      * This is a fancy wrapper inspired by Python's "with" statement. It should be called by Handles that intend to
-     * register their own Hass components. The callback will only be called if Hass is actually enabled.
+     * register their own Hass components.
      *
      * @param {withHassCb} callback
      * @return {void}
      */
     withHass(callback) {
-        if (this.hassEnabled) {
-            callback(this.hassController);
-        }
+        callback(this.hassController);
     }
 
 
@@ -682,12 +836,87 @@ class MqttController {
      */
     async publishHass(topic, message, options) {
         try {
-            await this.asyncClient.publish(topic, message, options);
+            await this.publish(topic, message, options);
         } catch (err) {
-            Logger.error("MQTT publication error:", err);
+            if (err.message !== "client disconnecting" && err.message !== "connection closed") {
+                Logger.error("MQTT publication error:", err);
+            }
+        }
+    }
+
+    /**
+     * This wrapper exists to enforce hard limits on buffered outgoing data on the mqtt tcp socket
+     * as there is no such limit in the library, meaning that a bad wifi connection can
+     * result in huge memory usage of outgoing messages piling up
+     *
+     * It is yet TBD how to properly handle such situations. For now we just drop all
+     * messages if there is already 1MiB buffered to not crash the process and also log
+     * a warning to trace this in the real world.
+     *
+     * @private
+     * @param {string} topic
+     * @param {string} message
+     * @param {object} [options]
+     * @return {Promise<any>}
+     */
+    async publish(topic, message, options) {
+        //@ts-ignore
+        if (this.client?.stream?.writableLength > 1024 * 1024) { //Allow for 1MiB of buffered messages
+            Logger.warn(`Stale MQTT connection detected. Dropping message for ${topic}`);
+        } else if (this.isConnected) {
+            //This looks like an afterthought because it is one. :(
+            const hasChanged = this.messageDeduplicationCache.update(topic, message);
+
+            if (hasChanged) {
+                this.stats.messages.count.sent++;
+                this.stats.messages.bytes.sent += message.length;
+                return this.asyncClient.publish(topic, message, options);
+            }
+        } else {
+            Logger.warn(`Aborting publish to ${topic} since we're currently not connected to any MQTT broker`);
         }
     }
 }
 
 
 module.exports = MqttController;
+
+/**
+ * @typedef {object} InternalMQTTConfiguration
+ *
+ * @property {string} [clientId]
+ * @property {string} [stateTopic]
+ * @property {number} [qos]
+ *
+ *
+ * @property {boolean} enabled
+ *
+ * @property {object} connection
+ * @property {string} connection.host
+ * @property {number} connection.port
+ *
+ * @property {object} connection.tls
+ * @property {boolean} connection.tls.enabled
+ * @property {string} connection.tls.ca
+ * @property {boolean} connection.tls.ignoreCertificateErrors
+ *
+ * @property {object} connection.authentication
+ *
+ * @property {object} connection.authentication.credentials
+ * @property {boolean} connection.authentication.credentials.enabled
+ * @property {string} connection.authentication.credentials.username
+ * @property {string} connection.authentication.credentials.password
+ *
+ * @property {object} connection.authentication.clientCertificate
+ * @property {boolean} connection.authentication.clientCertificate.enabled
+ * @property {string} connection.authentication.clientCertificate.certificate
+ * @property {string} connection.authentication.clientCertificate.key
+ *
+ * @property {object} identity
+ * @property {string} identity.identifier
+ *
+ * @property {object} customizations
+ * @property {string} customizations.topicPrefix
+ *
+ * @property {Array<string>} optionalExposedCapabilities
+ */

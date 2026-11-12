@@ -1,10 +1,12 @@
 const CapabilityMqttHandle = require("./CapabilityMqttHandle");
-const Commands = require("../common/Commands");
 const ComponentType = require("../homeassistant/ComponentType");
 const DataType = require("../homie/DataType");
+const DeviceClass = require("../homeassistant/DeviceClass");
+const EntityCategory = require("../homeassistant/EntityCategory");
 const HassAnchor = require("../homeassistant/HassAnchor");
 const InLineHassComponent = require("../homeassistant/components/InLineHassComponent");
 const PropertyMqttHandle = require("../handles/PropertyMqttHandle");
+const StateClass = require("../homeassistant/StateClass");
 const Unit = require("../common/Unit");
 
 class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
@@ -25,24 +27,12 @@ class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
             new PropertyMqttHandle({
                 parent: this,
                 controller: this.controller,
-                topicName: "refresh",
-                friendlyName: "Refresh configuration",
-                datatype: DataType.ENUM,
-                format: Commands.BASIC.PERFORM,
-                setter: async (value) => {
-                    await this.refresh();
-                }
-            })
-        );
-
-        this.registerChild(
-            new PropertyMqttHandle({
-                parent: this,
-                controller: this.controller,
                 topicName: "ssid",
                 friendlyName: "Wireless network",
                 datatype: DataType.STRING,
-                getter: async () => HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SSID).getValue()
+                getter: async () => {
+                    return this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_SSID).getValue();
+                }
             })
         );
 
@@ -53,7 +43,9 @@ class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
                 topicName: "ips",
                 friendlyName: "IP addresses",
                 datatype: DataType.STRING,
-                getter: async () => HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_IPS).getValue()?.join(",")
+                getter: async () => {
+                    return this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_IPS).getValue()?.join(",");
+                }
             })
         );
 
@@ -64,7 +56,9 @@ class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
                 topicName: "frequency",
                 friendlyName: "Frequency",
                 datatype: DataType.STRING,
-                getter: async () => HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_FREQUENCY).getValue()
+                getter: async () => {
+                    return this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_FREQUENCY).getValue();
+                }
             })
         );
 
@@ -76,7 +70,9 @@ class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
                 friendlyName: "Signal",
                 datatype: DataType.INTEGER,
                 unit: Unit.DECIBEL_MILLIWATT,
-                getter: async () => HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SIGNAL).getValue()
+                getter: async () => {
+                    return this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_SIGNAL).getValue();
+                }
             })
         );
 
@@ -88,23 +84,42 @@ class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
                     name: this.capability.getType(),
                     friendlyName: "Wi-Fi configuration",
                     componentType: ComponentType.SENSOR,
-                    baseTopicReference: HassAnchor.getTopicReference(HassAnchor.REFERENCE.HASS_WIFI_CONFIG_ATTRS),
+                    baseTopicReference: this.controller.hassAnchorProvider.getTopicReference(
+                        HassAnchor.REFERENCE.HASS_WIFI_CONFIG_ATTRS
+                    ),
                     autoconf: {
-                        state_topic: HassAnchor.getTopicReference(HassAnchor.REFERENCE.HASS_WIFI_CONFIG_ATTRS),
+                        state_topic: this.controller.hassAnchorProvider.getTopicReference(
+                            HassAnchor.REFERENCE.HASS_WIFI_CONFIG_ATTRS
+                        ),
                         value_template: "{{ value_json.state }}",
                         unit_of_measurement: "dBm",
                         icon: "mdi:wifi",
-                        json_attributes_topic: HassAnchor.getTopicReference(HassAnchor.REFERENCE.HASS_WIFI_CONFIG_ATTRS),
-                        json_attributes_template: "{{ value_json.attributes | to_json }}"
+                        json_attributes_topic: this.controller.hassAnchorProvider.getTopicReference(
+                            HassAnchor.REFERENCE.HASS_WIFI_CONFIG_ATTRS
+                        ),
+                        json_attributes_template: "{{ value_json.attributes | to_json }}",
+                        entity_category: EntityCategory.DIAGNOSTIC,
+                        device_class: DeviceClass.SIGNAL_STRENGTH,
+                        state_class: StateClass.MEASUREMENT
                     },
                     topics: {
                         "": {
-                            state: HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SIGNAL),
+                            state: this.controller.hassAnchorProvider.getAnchor(
+                                HassAnchor.ANCHOR.WIFI_SIGNAL
+                            ),
                             attributes: {
-                                ssid: HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SSID),
-                                ips: HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_IPS),
-                                frequency: HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_FREQUENCY),
-                                signal: HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SIGNAL)
+                                ssid: this.controller.hassAnchorProvider.getAnchor(
+                                    HassAnchor.ANCHOR.WIFI_SSID
+                                ),
+                                ips: this.controller.hassAnchorProvider.getAnchor(
+                                    HassAnchor.ANCHOR.WIFI_IPS
+                                ),
+                                frequency: this.controller.hassAnchorProvider.getAnchor(
+                                    HassAnchor.ANCHOR.WIFI_FREQUENCY
+                                ),
+                                signal: this.controller.hassAnchorProvider.getAnchor(
+                                    HassAnchor.ANCHOR.WIFI_SIGNAL
+                                )
                             }
                         }
                     }
@@ -114,14 +129,16 @@ class WifiConfigurationCapabilityMqttHandle extends CapabilityMqttHandle {
     }
 
     async refresh() {
-        const wifiCfg = await this.capability.getWifiConfiguration();
-        await HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SSID).post(wifiCfg.ssid ?? "");
-        await HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_IPS).post(wifiCfg.details?.ips ?? []);
-        await HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_FREQUENCY).post(wifiCfg.details?.frequency ?? "");
-        await HassAnchor.getAnchor(HassAnchor.ANCHOR.WIFI_SIGNAL).post(wifiCfg.details?.signal ?? 0);
+        const wifiCfg = await this.capability.getWifiStatus();
+        await this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_SSID).post(wifiCfg.details.ssid ?? "");
+        await this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_IPS).post(wifiCfg.details.ips ?? []);
+        await this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_FREQUENCY).post(wifiCfg.details.frequency ?? "");
+        await this.controller.hassAnchorProvider.getAnchor(HassAnchor.ANCHOR.WIFI_SIGNAL).post(wifiCfg.details.signal ?? 0);
 
-        super.refresh();
+        await super.refresh();
     }
 }
+
+WifiConfigurationCapabilityMqttHandle.OPTIONAL = false;
 
 module.exports = WifiConfigurationCapabilityMqttHandle;

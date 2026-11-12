@@ -1,5 +1,5 @@
-const Tools = require("../../Tools");
-const {MqttCommonAttributes} = require("../index");
+const MqttCommonAttributes = require("../MqttCommonAttributes");
+const Tools = require("../../utils/Tools");
 
 /**
  * This class is the main controller for all Hass components. Components are preferentially registered to the MQTT
@@ -22,12 +22,16 @@ class HassController {
      * @param {import("../MqttController")} options.controller
      * @param {import("../../core/ValetudoRobot")} options.robot
      * @param {import("../../Configuration")} options.config
+     * @param {string} options.friendlyName
      */
     constructor(options) {
         this.controller = options.controller;
         this.robot = options.robot;
         this.config = options.config;
+        this.friendlyName = options.friendlyName;
+
         this.loadConfig();
+
 
         /** @package */
         this.debugAnchors = false;
@@ -44,14 +48,13 @@ class HassController {
      * @private
      */
     loadConfig() {
-        const mqttConfig = this.config.get("mqtt");
         const debugConfig = this.config.get("debug");
 
-        this.autoconfPrefix = mqttConfig.homeassistant.autoconfPrefix;
-        this.topicPrefix = mqttConfig.topicPrefix;
-        this.identifier = mqttConfig.identifier;
-        this.friendlyName = mqttConfig.friendlyName;
-        this.qos = mqttConfig.qos;
+        this.topicPrefix = this.controller.currentConfig.customizations.topicPrefix;
+        this.identifier = this.controller.currentConfig.identity.identifier;
+        this.qos = this.controller.currentConfig.qos;
+
+        this.objectId = `valetudo_${this.identifier.toLowerCase()}`;
 
         this.debugAnchors = debugConfig.debugHassAnchors ?? false;
     }
@@ -66,13 +69,6 @@ class HassController {
     }
 
     /**
-     * Get configured base topic for homeassistant autoconfig
-     */
-    getBaseAutoconfTopic() {
-        return this.autoconfPrefix;
-    }
-
-    /**
      * Returns the "device" value common to all autodiscovery topics.
      *
      * @public
@@ -80,11 +76,12 @@ class HassController {
      */
     getAutoconfDeviceBoilerplate() {
         return {
-            manufacturer: this.robot.getManufacturer(),
-            model: this.robot.getModelName(),
+            manufacturer: "Valetudo",
+            model: `${this.robot.getManufacturer()} ${this.robot.getModelName()}`,
             name: this.friendlyName,
             identifiers: [this.identifier],
-            sw_version: Tools.GET_VALETUDO_VERSION() + " (Valetudo)"
+            sw_version: Tools.GET_VALETUDO_VERSION(),
+            configuration_url: `http://${Tools.GET_ZEROCONF_HOSTNAME()}`
         };
     }
 
@@ -154,6 +151,7 @@ class HassController {
      */
     async refresh(component, topics) {
         const base = component.getBaseTopic();
+
         for (const [topic, payload] of Object.entries(topics)) {
             await this.controller.publishHass(
                 topic === "" ? base : base + "/" + topic,
@@ -177,24 +175,11 @@ class HassController {
         if (!payload) {
             return;
         }
+
         await this.controller.publishHass(
             component.getAutoconfTopic(),
             JSON.stringify(payload),
             {qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE, retain: true}
-        );
-    }
-
-    /**
-     * Drop the autoconfiguration topic for the specified component.
-     *
-     * @param {import("./components/HassComponent")} component
-     * @return {Promise<void>}
-     */
-    async dropAutoconf(component) {
-        await this.controller.publishHass(
-            component.getAutoconfTopic(),
-            "",
-            {qos: MqttCommonAttributes.QOS.AT_LEAST_ONCE, retain: false}
         );
     }
 }

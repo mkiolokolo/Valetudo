@@ -1,8 +1,8 @@
 const CallbackHassAnchorSubscriber = require("../CallbackHassAnchorSubscriber");
 const HassAnchor = require("../HassAnchor");
+const HomieCommonAttributes = require("../../homie/HomieCommonAttributes");
 const Logger = require("../../../Logger");
 const NotImplementedError = require("../../../core/NotImplementedError");
-const {HomieCommonAttributes} = require("../../homie");
 
 class HassComponent {
     /**
@@ -40,7 +40,7 @@ class HassComponent {
      * @return {string}
      */
     getAutoconfTopic() {
-        return this.hass.getBaseAutoconfTopic() + "/" + this.componentType + "/" + this.hass.identifier + "/" + this.componentId + "/config";
+        return "homeassistant/" + this.componentType + "/" + this.hass.identifier + "/" + this.componentId + "/config";
     }
 
     /**
@@ -53,7 +53,8 @@ class HassComponent {
         if (json === null) {
             return anchors;
         }
-        const findAnchors = function (obj) {
+
+        const findAnchors = function (obj) { //recursion!
             for (const value of Object.values(obj)) {
                 if (value instanceof HassAnchor) {
                     anchors.push(value);
@@ -63,6 +64,7 @@ class HassComponent {
             }
         };
         findAnchors(json);
+
         return anchors;
     }
 
@@ -74,12 +76,15 @@ class HassComponent {
      */
     async configure() {
         await this.hass.subscribe(this);
+
         for (const anchor of this.getAllAnchors(this.getAutoconf())) {
             anchor.subscribe(this.topicRefSubscriber);
         }
+
         for (const anchor of this.getAllAnchors(this.getTopics())) {
             anchor.subscribe(this.anchorSubscriber);
         }
+
         await this.refreshAutoconf();
         await this.refresh();
     }
@@ -95,14 +100,13 @@ class HassComponent {
         if (options.unsubscribe) {
             await this.hass.unsubscribe(this);
         }
+
         for (const anchor of this.getAllAnchors(this.getAutoconf())) {
             anchor.unsubscribe(this.topicRefSubscriber);
         }
+
         for (const anchor of this.getAllAnchors(this.getTopics())) {
             anchor.unsubscribe(this.anchorSubscriber);
-        }
-        if (options.cleanHass) {
-            await this.hass.dropAutoconf(this);
         }
     }
 
@@ -117,13 +121,14 @@ class HassComponent {
         if (!this.hass.debugAnchors) {
             return;
         }
-        Logger.debug("Failed " + what + " for Hass component of type " + this.componentType + " and id " +
-            this.componentId + " due to the following unresolved anchors");
+
+        Logger.debug("Failed " + what + " for Hass component of type " + this.componentType + " and id " + this.componentId + " due to the following unresolved anchors");
         for (const anchor of this.getAllAnchors(json)) {
             if (anchor.getValue() === null) {
                 Logger.debug(" - type " + anchor.getType() + " subtype " + anchor.getSubType());
             }
         }
+
         try {
             // noinspection ExceptionCaughtLocallyJS
             throw new Error("See stack trace");
@@ -138,11 +143,12 @@ class HassComponent {
      * @return {Promise<void>}
      */
     async refreshAutoconf() {
-        const resolved = HassAnchor.resolveTopicReferences(this.getAutoconfInternal());
+        const resolved = this.hass.controller.hassAnchorProvider.resolveTopicReferences(this.getAutoconfInternal());
         if (resolved === null) {
             this.debugAnchors("autoconf", this.getAutoconf());
             return;
         }
+
         await this.hass.refreshAutoconf(this, resolved);
     }
 
@@ -153,11 +159,12 @@ class HassComponent {
      * @return {Promise<void>}
      */
     async refresh() {
-        const resolved = HassAnchor.resolveAnchors(this.getTopics());
+        const resolved = this.hass.controller.hassAnchorProvider.resolveAnchors(this.getTopics());
         if (resolved === null) {
             this.debugAnchors("refresh", this.getTopics());
             return;
         }
+
         await this.hass.refresh(this, resolved);
     }
 
@@ -182,7 +189,7 @@ class HassComponent {
     getAutoconfInternal() {
         return Object.assign(this.getAutoconf(), {
             unique_id: this.componentId,
-            availability_topic: HassAnchor.getTopicReference(HassAnchor.REFERENCE.AVAILABILITY),
+            availability_topic: this.hass.controller.hassAnchorProvider.getTopicReference(HassAnchor.REFERENCE.AVAILABILITY),
             payload_available: HomieCommonAttributes.STATE.READY,
             // MqttController will try to send "lost" at least once before cleanly disconnecting
             payload_not_available: HomieCommonAttributes.STATE.LOST,

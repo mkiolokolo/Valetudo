@@ -1,20 +1,24 @@
 const PersistentMapControlCapability = require("../../../core/capabilities/PersistentMapControlCapability");
 
-const entities = require("../../../entities");
-
-const stateAttrs = entities.state.attributes;
-
 /**
  * @extends PersistentMapControlCapability<import("../RoborockValetudoRobot")>
  */
 class RoborockPersistentMapControlCapability extends PersistentMapControlCapability {
     /**
+     * @param {object} options
+     * @param {import("../RoborockValetudoRobot")} options.robot
+     */
+    constructor(options) {
+        super(options);
+    }
+
+    /**
      * @returns {Promise<boolean>}
      */
     async isEnabled() {
-        const PersistentMapSettingStateAttribute = this.robot.state.getFirstMatchingAttributeByConstructor(stateAttrs.PersistentMapSettingStateAttribute);
+        await this.robot.pollState(); //The labStatus is part of the status response and gets stored in the robot instance
 
-        return !!(PersistentMapSettingStateAttribute && PersistentMapSettingStateAttribute.value === "enabled");
+        return this.robot.labStatus?.persistentMapEnabled ?? false;
     }
 
     /**

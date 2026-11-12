@@ -8,9 +8,9 @@ const NotImplementedError = require("../NotImplementedError");
 class WifiConfigurationCapability extends Capability {
     /**
      * @abstract
-     * @returns {Promise<import("../../entities/core/ValetudoWifiConfiguration")>}
+     * @returns {Promise<import("../../entities/core/ValetudoWifiStatus")>}
      */
-    async getWifiConfiguration() {
+    async getWifiStatus() {
         throw new NotImplementedError();
     }
 
@@ -25,6 +25,15 @@ class WifiConfigurationCapability extends Capability {
 
     getType() {
         return WifiConfigurationCapability.TYPE;
+    }
+
+    /**
+     * @return {{provisionedReconfigurationSupported: boolean}}
+     */
+    getProperties() {
+        return {
+            provisionedReconfigurationSupported: false
+        };
     }
 }
 

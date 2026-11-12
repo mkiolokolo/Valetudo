@@ -67,7 +67,8 @@ class ContainerEntity extends SerializableEntity {
      */
     subscribe(subscriber, matcher) {
         const metas = this.getAttributeSubscribersMetas(matcher, {exact: true});
-        let meta = null;
+        let meta;
+
         if (metas.length > 0) {
             meta = metas[0];
             if (metas.length > 1) {
@@ -117,26 +118,20 @@ class ContainerEntity extends SerializableEntity {
      */
     unsubscribeFromListedMetas(subscriber, metas) {
         const toDelete = [];
-        if (metas.length > 0) {
-            for (const meta of metas) {
-                let index = -1;
-                do {
-                    index = meta.subscribers.indexOf(subscriber);
-                    if (index >= 0) {
-                        meta.subscribers.splice(index, 1);
-                        if (meta.subscribers.length === 0) {
-                            toDelete.push(meta);
-                        }
-                    }
-                } while (index >= 0);
 
+        for (const meta of metas) {
+            meta.subscribers = meta.subscribers.filter(registeredSubscriber => {
+                return registeredSubscriber !== subscriber;
+            });
+
+            if (meta.subscribers.length === 0) {
+                toDelete.push(meta);
             }
         }
-        while (toDelete.length > 0) {
-            const emptyMeta = toDelete.pop();
-            const index = this.subscribers.indexOf(emptyMeta);
-            this.subscribers.splice(index, 1);
-        }
+
+        this.subscribers = this.subscribers.filter(subscriber => {
+            return !toDelete.includes(subscriber);
+        });
     }
 
     /**
@@ -175,13 +170,19 @@ class ContainerEntity extends SerializableEntity {
      * @returns {Array<any|import("./Attribute")>}
      */
     getMatchingAttributes(options) {
-        let needles = this.attributes.filter(e => e.constructor.name === options.attributeClass);
+        let needles = this.attributes.filter(e => {
+            return e.constructor.name === options.attributeClass;
+        });
 
         if (options.attributeType) {
-            needles = needles.filter(e => e.type === options.attributeType);
+            needles = needles.filter(e => {
+                return e.type === options.attributeType;
+            });
 
             if (options.attributeSubType) {
-                return needles.filter(e => e.subType === options.attributeSubType);
+                return needles.filter(e => {
+                    return e.subType === options.attributeSubType;
+                });
             } else {
                 return needles;
             }
@@ -198,7 +199,9 @@ class ContainerEntity extends SerializableEntity {
      */
     removeMatchingAttributes(options) {
         let needles = this.getMatchingAttributes(options);
-        this.attributes = this.attributes.filter(e => !needles.includes(e));
+        this.attributes = this.attributes.filter(e => {
+            return !needles.includes(e);
+        });
 
         for (const attr of needles) {
             this.notifySubscribers(EVENT_TYPE.DELETE, attr);
@@ -266,11 +269,15 @@ class ContainerEntity extends SerializableEntity {
         if (index === -1) {
             this.attributes.push(newAttribute);
             this.notifySubscribers(EVENT_TYPE.ADD, newAttribute);
+
+            return null;
         } else {
             const previousAttribute = this.attributes[index];
 
             this.attributes[index] = newAttribute;
             this.notifySubscribers(EVENT_TYPE.CHANGE, newAttribute, previousAttribute);
+
+            return previousAttribute;
         }
     }
 

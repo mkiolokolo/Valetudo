@@ -1,6 +1,7 @@
 const express = require("express");
-const Tools = require("../Tools");
-const {toXML} = require("jstoxml");
+const jstoxml = require("jstoxml");
+const Logger = require("../Logger");
+const Tools = require("../utils/Tools");
 
 
 class SSDPRouter {
@@ -9,12 +10,14 @@ class SSDPRouter {
      * @param {object} options
      * @param {import("../core/ValetudoRobot")} options.robot
      * @param {import("../Configuration")} options.config
+     * @param {import("../utils/ValetudoHelper")} options.valetudoHelper
      */
     constructor(options) {
         this.router = express.Router({mergeParams: true});
 
         this.config = options.config;
         this.robot = options.robot;
+        this.valetudoHelper = options.valetudoHelper;
 
         this.initRoutes();
     }
@@ -22,6 +25,8 @@ class SSDPRouter {
 
     initRoutes() {
         this.router.get("/valetudo.xml", (req, res) => {
+            Logger.debug(`SSDP: Received device description request from ${req.ip}`);
+
             res.set("Content-Type", "text/xml");
             res.send(this.getDeviceDescription(req.hostname));
         });
@@ -37,7 +42,7 @@ class SSDPRouter {
      * @returns {*}
      */
     getDeviceDescription(address) {
-        return toXML({
+        return jstoxml.toXML({
             _name: "root",
             _attrs: {
                 xmlns: "urn:schemas-upnp-org:device-1-0",
@@ -57,7 +62,7 @@ class SSDPRouter {
                         "deviceType": "urn:schemas-upnp-org:device:Basic:1"
                     },
                     {
-                        "friendlyName": "Valetudo " + this.robot.getModelName()
+                        "friendlyName": this.valetudoHelper.getFriendlyName()
                     },
                     {
                         "manufacturer": this.robot.getManufacturer()
